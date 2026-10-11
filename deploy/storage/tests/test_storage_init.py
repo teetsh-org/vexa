@@ -57,7 +57,7 @@ class FakeS3:
 
 @pytest.fixture(autouse=True)
 def isolated_env(monkeypatch):
-    for name in ("S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY", "MINIO_ENDPOINT", "MINIO_SECURE",
+    for name in ("S3_ENDPOINT", "S3_REGION", "S3_ACCESS_KEY", "S3_SECRET_KEY", "MINIO_ENDPOINT", "MINIO_SECURE",
                  "MINIO_BUCKET", "RECORDING_BUCKET", "BOT_S3_ENDPOINT", "BOT_S3_ACCESS_KEY",
                  "BOT_S3_SECRET_KEY", "BOT_S3_BUCKET", "BOT_USERDATA_S3_PATH", "STORAGE_ENDPOINT"):
         monkeypatch.delenv(name, raising=False)
@@ -70,7 +70,7 @@ def store(monkeypatch):
     fake = FakeS3()
     monkeypatch.setenv("MINIO_ENDPOINT", "storage:9000")
     monkeypatch.setenv("MINIO_BUCKET", "test-recordings")
-    monkeypatch.setattr(storage_init, "client", lambda *args: fake)
+    monkeypatch.setattr(storage_init, "client", lambda *args, **kwargs: fake)
     return fake
 
 
@@ -180,14 +180,35 @@ def test_explicit_credentials_and_bucket_fallback(store, monkeypatch):
     monkeypatch.setenv("RECORDING_BUCKET", "fallback-bucket")
     clients = []
 
-    def client(*args):
-        clients.append(args)
+    def client(*args, **kwargs):
+        clients.append((args, kwargs))
         return store
 
     monkeypatch.setattr(storage_init, "client", client)
     assert storage_init.main() == 0
-    assert clients == [("https://s3.invalid", "explicit-key", "explicit-secret")]
+    assert clients == [(("https://s3.invalid", "explicit-key", "explicit-secret"), {"region": None})]
     assert {bucket for _, bucket, _ in store.calls} == {"fallback-bucket"}
+
+
+def test_region_signs_the_recordings_store_only(store, monkeypatch):
+    """S3_REGION reaches the readiness client; the bundled store's clients keep boto3's default."""
+    monkeypatch.setenv("S3_ENDPOINT", "https://s3.fr-par.example")
+    monkeypatch.setenv("S3_REGION", "fr-par")
+    monkeypatch.setenv("STORAGE_ENDPOINT", "http://storage:9000")
+    monkeypatch.setenv("BOT_S3_ENDPOINT", "http://storage:9000")
+    monkeypatch.setenv("BOT_S3_ACCESS_KEY", "bot")
+    monkeypatch.setenv("BOT_S3_SECRET_KEY", "bot-secret")
+    monkeypatch.setenv("BOT_USERDATA_S3_PATH", "userdata")
+    clients = []
+
+    def client(endpoint, *args, region=None):
+        clients.append((endpoint, region))
+        return store
+
+    monkeypatch.setattr(storage_init, "client", client)
+    monkeypatch.setattr(storage_init, "wait_ready", lambda *a, **k: False)
+    assert storage_init.main() == 1  # stops at the bundled store's readiness, after both clients exist
+    assert clients == [("https://s3.fr-par.example", "fr-par"), ("http://storage:9000", None)]
 
 
 def test_scope_probe_never_writes_recordings(store, monkeypatch):
@@ -199,7 +220,7 @@ def test_scope_probe_never_writes_recordings(store, monkeypatch):
                 return getattr(store, operation)(**kwargs)
             return call
 
-    monkeypatch.setattr(storage_init, "client", lambda *args: ScopedClient())
+    monkeypatch.setattr(storage_init, "client", lambda *args, **kwargs: ScopedClient())
     original = dict(store.objects)
     assert storage_init.prove_scope("http://storage:9000", "bot", "secret", "test-recordings", "userdata", store) == []
     assert store.objects == original

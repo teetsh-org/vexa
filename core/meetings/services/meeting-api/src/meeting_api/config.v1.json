@@ -266,6 +266,13 @@
    ]
   },
   {
+   "key": "S3_REGION",
+   "class": "defaulted",
+   "default": "(unset — boto3's default, us-east-1)",
+   "description": "signing region of the S3_ENDPOINT store, for providers that check it (Scaleway: fr-par)",
+   "targets": ["compose"]
+  },
+  {
    "key": "S3_ACCESS_KEY",
    "class": "defaulted",
    "default": "(unset — falls back to MINIO_ACCESS_KEY)",

@@ -18,11 +18,15 @@ class S3Storage:
     """``Storage`` over an S3/MinIO bucket (boto3). Lazy client so the package imports without boto3."""
 
     def __init__(self, *, bucket: str, endpoint_url: Optional[str] = None,
-                 access_key: Optional[str] = None, secret_key: Optional[str] = None):
+                 access_key: Optional[str] = None, secret_key: Optional[str] = None,
+                 region: Optional[str] = None):
         self._bucket = bucket
         self._endpoint = endpoint_url
         self._access_key = access_key
         self._secret_key = secret_key
+        # None keeps boto3's default (us-east-1, what MinIO/versitygw expect); a store that checks
+        # the signing region (Scaleway: fr-par) needs its own.
+        self._region = region
         self._client = None
 
     def _c(self):
@@ -32,6 +36,7 @@ class S3Storage:
             self._client = boto3.client(
                 "s3", endpoint_url=self._endpoint,
                 aws_access_key_id=self._access_key, aws_secret_access_key=self._secret_key,
+                region_name=self._region,
             )
         return self._client
 
@@ -266,5 +271,6 @@ def build_production_router(*, database_url: Optional[str] = None):
         endpoint_url=os.getenv("S3_ENDPOINT"),
         access_key=os.getenv("S3_ACCESS_KEY"),
         secret_key=os.getenv("S3_SECRET_KEY"),
+        region=os.getenv("S3_REGION") or None,
     )
     return build_router(SqlAlchemyRecordingRepo(session_factory), storage)

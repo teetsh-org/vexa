@@ -94,6 +94,7 @@ services:
     environment:
       - STORAGE_ENDPOINT=http://storage:9000
       - S3_ENDPOINT=${S3_ENDPOINT:-}
+      - S3_REGION=${S3_REGION:-}
       - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
       - S3_SECRET_KEY=${S3_SECRET_KEY:-}
       - MINIO_ENDPOINT=${MINIO_ENDPOINT:-storage:9000}
@@ -398,6 +399,7 @@ services:
       # Self-hosted Jitsi hostnames (comma-separated) recognized in pasted + calendar links.
       - VEXA_JITSI_HOSTS=${VEXA_JITSI_HOSTS:-}
       - S3_ENDPOINT=${S3_ENDPOINT:-}
+      - S3_REGION=${S3_REGION:-}
       - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
       - S3_SECRET_KEY=${S3_SECRET_KEY:-}
       - MINIO_ENDPOINT=${MINIO_ENDPOINT:-storage:9000}

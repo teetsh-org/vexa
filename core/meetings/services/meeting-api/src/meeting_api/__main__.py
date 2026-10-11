@@ -146,6 +146,7 @@ def build_production_app():
         endpoint_url=os.getenv("S3_ENDPOINT") or _minio_endpoint_url(),
         access_key=os.getenv("S3_ACCESS_KEY") or os.getenv("MINIO_ACCESS_KEY"),
         secret_key=os.getenv("S3_SECRET_KEY") or os.getenv("MINIO_SECRET_KEY"),
+        region=os.getenv("S3_REGION") or None,
     )
 
     # Per-user webhook delivery (WebhookSink: SSRF-guard → event-filter → sign → POST → enqueue-retry).

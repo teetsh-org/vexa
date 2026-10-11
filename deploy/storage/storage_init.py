@@ -4,7 +4,7 @@
 Runs inside the meeting-api image, which already carries boto3. Safe to re-run.
 
 1. Resolve the endpoint meeting-api will use, the way meeting-api resolves it: S3_ENDPOINT, else
-   MINIO_ENDPOINT (host:port) with MINIO_SECURE.
+   MINIO_ENDPOINT (host:port) with MINIO_SECURE, signed for S3_REGION when set.
 2. Ensure the bucket exists, then PUT, GET (compare bytes), and DELETE a unique probe under
    .vexa-storage-init/. Every endpoint must pass, including operator-managed S3 stores.
 3. Authenticated bots configured against this storage (BOT_S3_ENDPOINT on the storage host, with
@@ -57,9 +57,10 @@ def hostport(url: str) -> tuple[str, int]:
     return (u.hostname or "").lower(), u.port or (443 if u.scheme == "https" else 80)
 
 
-def client(endpoint: str, access: str, secret: str):
+def client(endpoint: str, access: str, secret: str, region: str | None = None):
     return boto3.client(
         "s3", endpoint_url=endpoint, aws_access_key_id=access, aws_secret_access_key=secret,
+        region_name=region,
         config=Config(retries={"max_attempts": 2}, connect_timeout=5, read_timeout=30),
     )
 
@@ -107,7 +108,9 @@ def check_readiness(endpoint: str, access: str, secret: str, bucket: str) -> boo
     payload = b"vexa storage readiness"
     probe_written = False
     try:
-        c = client(endpoint, access, secret)
+        # S3_REGION signs for the recordings store only: a provider that checks the region
+        # (Scaleway: fr-par) refuses boto3's us-east-1 default, which the bundled store expects.
+        c = client(endpoint, access, secret, region=os.getenv("S3_REGION") or None)
         step = "HEAD bucket"
         try:
             c.head_bucket(Bucket=bucket)

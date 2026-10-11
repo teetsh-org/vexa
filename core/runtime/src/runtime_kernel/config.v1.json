@@ -157,6 +157,27 @@
    "targets": ["compose", "helm", "lite"]
   },
   {
+   "key": "VEXA_VIDEO_RECORDING",
+   "class": "defaulted",
+   "default": "(unset — off)",
+   "description": "1 films the bot display beside the audio recording and uploads it as a video MediaFile; forwarded to spawned bots",
+   "targets": ["compose"]
+  },
+  {
+   "key": "ENCODE_H264",
+   "class": "defaulted",
+   "default": "(unset — VP9 WebM)",
+   "description": "true encodes video recordings as H.264 MP4; forwarded to spawned bots",
+   "targets": ["compose"]
+  },
+  {
+   "key": "VIDEO_HEIGHT",
+   "class": "defaulted",
+   "default": "(unset — 1080)",
+   "description": "output height of video recordings (e.g. 720); forwarded to spawned bots",
+   "targets": ["compose"]
+  },
+  {
    "key": "BOT_SPEAKER_MIN_AUDIO_SEC",
    "class": "defaulted",
    "default": "(unset — bot default)",

@@ -105,7 +105,8 @@ FROM vexa/meet-join-env:dev AS runtime
 # shells out to `aws s3` to restore the signed-in profile before launch and write
 # it back on clean teardown; without the binary every authenticated spawn fails
 # at session-restore. The Playwright + humanized-X11 stack (xvfb·xdotool·xclip·
-# x11vnc·websockify) comes from the base.
+# x11vnc·websockify) comes from the base. ffmpeg films the Xvfb display for video recordings
+# (x11grab → libx264) and muxes the meeting audio into it (VEXA_VIDEO_RECORDING=1).
 # noble (#1011) dropped `awscli` from the archive — `apt-get install awscli` has no
 # installation candidate there, which broke this image the moment the base moved. AWS's
 # own v2 installer is the supported path on 24.04; it is the same binary the session
@@ -115,6 +116,7 @@ RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get install -y --no-install-recommends \
        pulseaudio \
        fluxbox \
+       ffmpeg \
        socat \
        ca-certificates \
        curl \

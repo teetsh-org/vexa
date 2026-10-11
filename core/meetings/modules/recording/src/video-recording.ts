@@ -228,6 +228,9 @@ export class VideoRecordingService {
       '-c:v', 'copy',
       // Copy audio stream when possible; WAV/PCM must be encoded for webm/mkv containers.
       '-c:a', audioPath.endsWith('.wav') ? (this.format === 'webm' ? 'libopus' : 'aac') : 'copy',
+      // The muxed file is served for playback: put the MP4 index first so browsers can seek
+      // before the whole file has downloaded.
+      ...(this.format === 'mp4' ? ['-movflags', '+faststart'] : []),
       '-shortest',
       muxedPath,
     ];
@@ -316,13 +319,18 @@ export class VideoRecordingService {
       }
       default: {
         if (this.encodeH264) {
-          // CPU H.264 — universally supported including Safari
+          // CPU H.264 — universally supported including Safari. VIDEO_HEIGHT downscales the
+          // 1080p display (e.g. 720) to cut encode CPU and file size. Fragmented MP4 keeps the
+          // file playable up to the last fragment if ffmpeg is killed before it finalizes.
+          const height = parseInt(process.env.VIDEO_HEIGHT || '', 10);
           encoderArgs = [
+            ...(height > 0 ? ['-vf', `scale=-2:${height}`] : []),
             '-c:v', 'libx264',
             '-crf', '28',
             '-preset', 'ultrafast',
             '-tune', 'zerolatency',
             '-pix_fmt', 'yuv420p',
+            '-movflags', '+frag_keyframe+empty_moov+default_base_moof',
           ];
         } else {
           // Software VP9 — excellent compression for screen content

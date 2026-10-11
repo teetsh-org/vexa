@@ -43,6 +43,7 @@ import type { BotRecordingSink } from './recording.js';
 import type { TelemetrySink } from './ports.js';
 import type { RemoteAudioActivityTap } from './aloneness.js';
 import { createTtsPlayback } from './tts-playback.js';
+import { startBotVideoRecording } from './video.js';
 
 /** Float32 PCM → base64 of its little-endian bytes — the EXACT codec wire payload, so a stored
  *  captured-signal.v1 frame round-trips through @vexa/capture-codec (encode→decode→same PCM). */
@@ -1392,12 +1393,18 @@ export async function startRecording(page: Page, inv: Invocation, recording: Bot
     const n = raw ? parseInt(raw, 10) : NaN;
     return Number.isFinite(n) && n > 0 ? n : 15000;
   })();
+  // Video rides beside the audio tap (null unless VEXA_VIDEO_RECORDING=1): ffmpeg starts filming
+  // now, gets a copy of every audio chunk, and the tap's t=0 for alignment.
+  const video = startBotVideoRecording(inv, (m) => console.log(`[bot] ${m}`));
   // Node-side: decode one base64 recording.v1 chunk → the per-chunk upload sink. mimeType→format.
   await page.exposeFunction('__vexaRecordingChunk', (base64: string, chunkSeq: number, isFinal: boolean, mimeType: string): void => {
     const bytes = base64 ? new Uint8Array(Buffer.from(base64, 'base64')) : new Uint8Array(0);
     const format: RecordingMasterFormat = /wav/i.test(mimeType) ? 'wav' : 'webm';
     recording.chunk(key, chunkSeq, isFinal, format, bytes);
+    video?.audioChunk(bytes);
   }).catch((e: Error) => { if (!String(e.message).includes('already registered')) throw e; });
+  await page.exposeFunction('__vexaRecordingStarted', (): void => { video?.audioStarted(); })
+    .catch((e: Error) => { if (!String(e.message).includes('already registered')) throw e; });
 
   // Page-side: start the generic recording tap (finds + combines the page audio elements).
   await page.evaluate(async (timesliceMs) => {
@@ -1409,17 +1416,20 @@ export async function startRecording(page: Page, inv: Invocation, recording: Bot
           try { await w.__vexaRecordingChunk(c.base64, c.chunkSeq, c.isFinal, c.mimeType); return true; }
           catch { return false; }
         },
+        onStarted: () => { w.__vexaRecordingStarted?.().catch?.(() => { /* best-effort */ }); },
       });
       await w.__vexaRecordingTap.start();
     }
   }, timesliceMs).catch((e) => { console.error(`[bot] recording bridge: page-side start failed: ${String(e)}`); });
 
-  // Stop fn: stop the recorder so it flushes the final (isFinal) chunk → master assembly.
+  // Stop fn: stop the recorder so it flushes the final (isFinal) chunk → master assembly, then
+  // close the video (its audio copy is complete once the final chunk has crossed).
   return async () => {
     await page.evaluate(async () => {
       const w = (globalThis as any) as Record<string, any>;
       try { await w.__vexaRecordingTap?.stop?.(); } catch { /* best-effort */ }
     }).catch(() => { /* page already gone */ });
+    await video?.finish();
   };
 }
 

@@ -142,6 +142,10 @@ def default_registry() -> ProfileRegistry:
             "BOT_SPEAKER_CONFIRM_THRESHOLD",
             "BOT_SPEAKER_MAX_BUFFER_SEC",
             "BOT_SPEAKER_IDLE_TIMEOUT_SEC",
+            # Video recording (bot video.ts + @vexa/recording VideoRecordingService).
+            "VEXA_VIDEO_RECORDING",
+            "ENCODE_H264",
+            "VIDEO_HEIGHT",
         )
         if os.environ.get(key, "").strip()
     }

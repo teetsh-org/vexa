@@ -33,7 +33,7 @@ export async function stageMeetingForVideo(page: Page, inv: Invocation, log: (ms
     log(`video: full-screen failed: ${String(e)}`);
   }
   if (inv.platform !== 'google_meet') return;
-  await page.evaluate(() => {
+  await page.evaluate((botName: string) => {
     // Runs page-side; the bot compiles without the DOM lib, hence the untyped globals.
     const g = globalThis as any;
     const doc = g.document;
@@ -41,9 +41,18 @@ export async function stageMeetingForVideo(page: Page, inv: Invocation, log: (ms
     // Meet's device warnings ("Camera not found", "Microphone not found"): the bot has no devices
     // by design, so the warning is noise in every frame it covers.
     const DEVICE_WARNING = /(camera|microphone|caméra|micro)[^.]{0,40}(not found|introuvable|aucun)|(no|aucune?) (camera|microphone|caméra|micro)/i;
+    // The bot's tile: Meet's self marker when it renders inside the tile, else the tile that
+    // carries the bot's display name (a guest bot's tile has no self marker).
+    const selfTiles = (): any[] => {
+      const marked = doc.querySelector('[data-self-name]')?.closest('[data-participant-id]');
+      const named = Array.from(doc.querySelectorAll('[data-participant-id]')).filter((t: any) =>
+        t.querySelector('span.notranslate')?.textContent?.trim() === botName);
+      return marked ? [marked, ...named] : named;
+    };
     const hideSelf = (): void => {
-      const tile = doc.querySelector('[data-self-name]')?.closest('[data-participant-id]');
-      if (tile && tile.style.visibility !== 'hidden') tile.style.setProperty('visibility', 'hidden', 'important');
+      for (const tile of selfTiles()) {
+        if (tile.style.visibility !== 'hidden') tile.style.setProperty('visibility', 'hidden', 'important');
+      }
     };
     const hideDeviceWarnings = (): void => {
       const walker = doc.createTreeWalker(doc.body, g.NodeFilter.SHOW_TEXT);
@@ -62,7 +71,7 @@ export async function stageMeetingForVideo(page: Page, inv: Invocation, log: (ms
       }
     };
     g.__vexaVideoStage = setInterval(() => { try { hideSelf(); hideDeviceWarnings(); } catch { /* next tick */ } }, 1000);
-  }).catch((e) => log(`video: stage script failed: ${String(e)}`));
+  }, inv.botName ?? '').catch((e) => log(`video: stage script failed: ${String(e)}`));
 }
 
 export interface BotVideoRecording {

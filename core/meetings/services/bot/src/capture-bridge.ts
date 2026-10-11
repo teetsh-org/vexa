@@ -594,7 +594,12 @@ export async function launchBrowser(inv: Invocation): Promise<BrowserSession> {
   // getAuthenticatedBrowserArgs() is the minimal clean set remote-browser uses for signed-in
   // joins; getJoinBrowserArgs() adds the fake-device / autoplay flags the join lane needs. The
   // join args win on conflict (later wins in Chromium arg parsing).
-  const args = [...getAuthenticatedBrowserArgs(), ...getJoinBrowserArgs()];
+  const args = [
+    ...getAuthenticatedBrowserArgs(),
+    ...getJoinBrowserArgs(),
+    // A filmed display must not carry Chrome's "unsupported command-line flag" infobar.
+    ...(videoRecordingEnabled() ? ['--test-type'] : []),
+  ];
   const { context, page } = await launchPersistentBrowser({ dataDir, args });
 
   // Voice-agent gate the page reads to decide whether to keep the mic hot (production parity).

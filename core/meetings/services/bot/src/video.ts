@@ -45,13 +45,21 @@ export async function stageMeetingForVideo(page: Page, inv: Invocation, log: (ms
     // carries the bot's display name (a guest bot's tile has no self marker).
     const selfTiles = (): any[] => {
       const marked = doc.querySelector('[data-self-name]')?.closest('[data-participant-id]');
-      const named = Array.from(doc.querySelectorAll('[data-participant-id]')).filter((t: any) =>
-        t.querySelector('span.notranslate')?.textContent?.trim() === botName);
+      const named = botName
+        ? Array.from(doc.querySelectorAll('[data-participant-id]')).filter((t: any) => {
+          const id = t.getAttribute('data-participant-id');
+          // A tile, not a container of other participants' tiles.
+          const nestsOthers = Array.from(t.querySelectorAll('[data-participant-id]')).some((d: any) => d.getAttribute('data-participant-id') !== id);
+          return !nestsOthers && (t.textContent || '').includes(botName);
+        })
+        : [];
       return marked ? [marked, ...named] : named;
     };
     const hideSelf = (): void => {
       for (const tile of selfTiles()) {
-        if (tile.style.visibility !== 'hidden') tile.style.setProperty('visibility', 'hidden', 'important');
+        if (tile.style.visibility === 'hidden') continue;
+        tile.style.setProperty('visibility', 'hidden', 'important');
+        console.log(`[video-stage] hid own tile ${tile.getAttribute('data-participant-id')}`);
       }
     };
     const hideDeviceWarnings = (): void => {

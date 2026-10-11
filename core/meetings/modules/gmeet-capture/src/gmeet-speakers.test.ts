@@ -108,5 +108,28 @@ const tile = (id: string, name: string, opts: { speaking?: boolean; self?: boole
   sp.destroy();
 }
 
+{
+  // Two participants with the SAME display name get distinct labels, each tied to its participant id.
+  const hints: { name: string; isEnd: boolean }[] = [];
+  const assigned: [string, string][] = [];
+  setDoc(e('body', {}, [ tile('spaces/a/devices/1', 'Thibault', { speaking: true }), tile('spaces/a/devices/2', 'Thibault') ]));
+  const sp = createGmeetSpeakers({
+    pollMs: 10,
+    onSpeaking: (name, isEnd) => hints.push({ name, isEnd }),
+    onParticipant: (label, id) => assigned.push([label, id]),
+  });
+  tick();
+  check('first namesake keeps the plain name', sp.participantIdOf('Thibault') === 'spaces/a/devices/1');
+  check('second namesake is suffixed', sp.participantIdOf('Thibault (2)') === 'spaces/a/devices/2');
+  check('each label reported once with its id', assigned.length === 2 && assigned[1][0] === 'Thibault (2)' && assigned[1][1] === 'spaces/a/devices/2');
+  setDoc(e('body', {}, [ tile('spaces/a/devices/1', 'Thibault'), tile('spaces/a/devices/2', 'Thibault', { speaking: true }) ]));
+  tick();
+  check('turn rotation between namesakes is visible (END plain, START suffixed)',
+    hints.some((h) => h.name === 'Thibault' && h.isEnd) && hints.some((h) => h.name === 'Thibault (2)' && !h.isEnd));
+  check('labels are stable across scans', assigned.length === 2);
+  check('unknown label has no participant id', sp.participantIdOf('Nobody') === null);
+  sp.destroy();
+}
+
 if (failed) { console.error(`\n❌ gmeet-speakers: ${failed} checks FAILED.`); process.exit(1); }
 console.log(`\n✅ gmeet-speakers: glow→START/END hint edges, self-tile suppression, junk-name filter pass. (DOM scraping is live-validated.)`);

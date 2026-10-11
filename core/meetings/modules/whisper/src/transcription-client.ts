@@ -1,5 +1,6 @@
 import { log } from './log.js';
 import { isLowConfidenceSegment } from './confidence.js';
+import { isForeignToLanguage } from './language-guard.js';
 
 export interface TranscriptionWord {
   word: string;
@@ -49,6 +50,9 @@ export interface TranscriptionClientConfig {
    *  (Groq, vLLM, gateways) need their served name; the bundled unit ignores it (its model is
    *  the unit's own MODEL_SIZE). Default: "whisper-1". */
   model?: string;
+  /** Domain vocabulary sent as repeated `context_bias` form parts (Mistral Voxtral): spellings the
+   *  model should prefer for names and jargon ("Teetsh", "LSU"). Backends without the field ignore it. */
+  contextBias?: string[];
 }
 
 /** The STT boundary's FAILURE vocabulary (P5 + P18: an adapter must translate the
@@ -102,6 +106,7 @@ export class TranscriptionClient {
   private maxSpeechDurationSec: number | undefined;
   private minSilenceDurationMs: number | undefined;
   private model: string;
+  private contextBias: string[];
   private responseFormat: 'verbose_json' | 'json' = 'verbose_json';
   constructor(config: TranscriptionClientConfig) {
     // Ensure serviceUrl ends with the transcriptions endpoint
@@ -117,6 +122,7 @@ export class TranscriptionClient {
     this.maxSpeechDurationSec = config.maxSpeechDurationSec;
     this.minSilenceDurationMs = config.minSilenceDurationMs;
     this.model = config.model ?? 'whisper-1';
+    this.contextBias = (config.contextBias ?? []).map(t => t.trim()).filter(Boolean);
   }
 
   /**
@@ -237,6 +243,15 @@ export class TranscriptionClient {
       ));
     }
 
+    // Domain vocabulary, one part per term
+    for (const term of this.contextBias) {
+      parts.push(Buffer.from(
+        `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="context_bias"\r\n\r\n` +
+        `${term}\r\n`
+      ));
+    }
+
     // End boundary
     parts.push(Buffer.from(`--${boundary}--\r\n`));
 
@@ -280,11 +295,18 @@ export class TranscriptionClient {
       // rebuild the text from what survives, so phantoms never reach the pipeline.
       // If the model returned no segments we can't score, so keep its text as-is.
       const segments = allSegments.filter((s: any) => !isLowConfidenceSegment(s));
-      const text = allSegments.length
+      let text = allSegments.length
         ? segments.map((s: any) => (s.text || '').trim()).filter(Boolean).join(' ')
         : (data.text || '');
       if (allSegments.length && segments.length < allSegments.length) {
         log(`[STT] dropped ${allSegments.length - segments.length}/${allSegments.length} low-confidence segment(s)`);
+      }
+      // A forced language is the invocation's assertion about the meeting: a window the backend
+      // returned in another language is a hallucination or cross-talk, never transcript.
+      if (language && isForeignToLanguage(text, language)) {
+        log(`[STT] dropped window not in forced language "${language}": "${text.slice(0, 60)}"`);
+        text = '';
+        segments.length = 0;
       }
       return {
         text,

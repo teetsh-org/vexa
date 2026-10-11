@@ -43,7 +43,8 @@ import type { BotRecordingSink } from './recording.js';
 import type { TelemetrySink } from './ports.js';
 import type { RemoteAudioActivityTap } from './aloneness.js';
 import { createTtsPlayback } from './tts-playback.js';
-import { startBotVideoRecording } from './video.js';
+import { recordParticipant } from './participants.js';
+import { stageMeetingForVideo, startBotVideoRecording, videoRecordingEnabled } from './video.js';
 
 /** Float32 PCM → base64 of its little-endian bytes — the EXACT codec wire payload, so a stored
  *  captured-signal.v1 frame round-trips through @vexa/capture-codec (encode→decode→same PCM). */
@@ -775,6 +776,7 @@ export async function startCaptureBridge(
     if (!String(e.message).includes('already registered')) throw e;
   });
   await page.exposeFunction('__vexaNamedAudioData', onNamedAudio).catch(() => { /* optional */ });
+  await page.exposeFunction('__vexaParticipant', recordParticipant).catch(() => { /* optional */ });
   await page.exposeFunction('__vexaSpeakerHint', onSpeakerHint).catch(() => { /* optional */ });
   await page.exposeFunction('__vexaTeamsCaption', onTeamsCaption).catch(() => { /* optional */ });
   await page.exposeFunction('__vexaCsrc', onCsrc).catch(() => { /* optional */ });
@@ -1278,7 +1280,10 @@ export async function startCaptureBridge(
     // gmeet lane: per-channel capture + glow attribution (the SAME module the extension runs).
     if (w.VexaBrowserUtils?.createGmeetCapture && !w.__vexaGmeetCapture) {
       w.__vexaGmeetSpeakers = w.__vexaGmeetSpeakers
-        ?? w.VexaBrowserUtils.createGmeetSpeakers?.({ log: (m: string) => w.logBot?.('[PerSpeaker] ' + m) });
+        ?? w.VexaBrowserUtils.createGmeetSpeakers?.({
+          log: (m: string) => w.logBot?.('[PerSpeaker] ' + m),
+          onParticipant: (label: string, id: string) => { w.__vexaParticipant?.(label, id)?.catch?.(() => { /* best-effort */ }); },
+        });
       w.__vexaGmeetCapture = w.VexaBrowserUtils.createGmeetCapture({
         log: (m: string) => w.logBot?.('[PerSpeaker] ' + m),
         onAudio: (index: number, pcm: Float32Array) => {
@@ -1395,7 +1400,9 @@ export async function startRecording(page: Page, inv: Invocation, recording: Bot
   })();
   // Video rides beside the audio tap (null unless VEXA_VIDEO_RECORDING=1): ffmpeg starts filming
   // now, gets a copy of every audio chunk, and the tap's t=0 for alignment.
-  const video = startBotVideoRecording(inv, (m) => console.log(`[bot] ${m}`));
+  const videoLog = (m: string): void => console.log(`[bot] ${m}`);
+  if (videoRecordingEnabled()) await stageMeetingForVideo(page, inv, videoLog);
+  const video = startBotVideoRecording(inv, videoLog);
   // Node-side: decode one base64 recording.v1 chunk → the per-chunk upload sink. mimeType→format.
   await page.exposeFunction('__vexaRecordingChunk', (base64: string, chunkSeq: number, isFinal: boolean, mimeType: string): void => {
     const bytes = base64 ? new Uint8Array(Buffer.from(base64, 'base64')) : new Uint8Array(0);

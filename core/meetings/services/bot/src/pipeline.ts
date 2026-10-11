@@ -41,6 +41,7 @@ import { TranscriptionClient, type TranscriptionResult } from '@vexa/transcribe-
 import { isMixedLanePlatform, isPerTrackLanePlatform, type Invocation, type Platform } from './config.js';
 import type { TranscriptSegment } from './contracts.js';
 import type { Pipeline, TranscriptSink } from './ports.js';
+import { participantIdFor } from './participants.js';
 
 /** stt.v1 round-trip — real adapter = TranscriptionClient.transcribe; L2/L3 = a mock. The
  *  lane bakes language/prompt at the call site, so the closure carries the configured language. */
@@ -136,6 +137,7 @@ function toBotSegment(seg: LaneSegment): TranscriptSegment {
     // reaches the same dashboard — so it gets the same treatment. One rule, both lanes.
     speaker: displaySpeaker(seg.speaker ?? ''),
     speaker_key: seg.speaker_key,
+    speaker_id: participantIdFor(seg.speaker),
     text: seg.text,
     start: seg.start,
     end: seg.end,
@@ -422,6 +424,8 @@ export function createTranscribe(inv: Invocation): Transcribe {
     serviceUrl: inv.transcriptionServiceUrl,
     apiToken: inv.transcriptionServiceToken,
     model: inv.transcriptionModel ?? undefined,
+    // Deployment vocabulary (comma-separated), e.g. "Teetsh,LSU" — forwarded by the runtime.
+    contextBias: (process.env.TRANSCRIPTION_CONTEXT_BIAS ?? '').split(','),
   });
   const language = inv.language ?? undefined;
   return (pcm, prompt) => client.transcribe(pcm, language, prompt);

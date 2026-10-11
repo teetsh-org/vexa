@@ -178,6 +178,13 @@
    "targets": ["compose"]
   },
   {
+   "key": "TRANSCRIPTION_CONTEXT_BIAS",
+   "class": "defaulted",
+   "default": "(unset — no vocabulary)",
+   "description": "comma-separated domain vocabulary sent to the STT backend as context_bias (Mistral Voxtral); forwarded to spawned bots",
+   "targets": ["compose"]
+  },
+  {
    "key": "BOT_SPEAKER_MIN_AUDIO_SEC",
    "class": "defaulted",
    "default": "(unset — bot default)",

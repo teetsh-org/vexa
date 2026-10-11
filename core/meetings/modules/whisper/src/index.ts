@@ -16,4 +16,5 @@ export type {
   TranscriptionFaultKind,
 } from './transcription-client.js';
 export { isLowConfidenceSegment } from './confidence.js';
+export { isForeignToLanguage } from './language-guard.js';
 export { setLogger } from './log.js';

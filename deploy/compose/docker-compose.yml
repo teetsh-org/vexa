@@ -188,6 +188,7 @@ services:
       - VEXA_VIDEO_RECORDING=${VEXA_VIDEO_RECORDING:-}
       - ENCODE_H264=${ENCODE_H264:-}
       - VIDEO_HEIGHT=${VIDEO_HEIGHT:-}
+      - TRANSCRIPTION_CONTEXT_BIAS=${TRANSCRIPTION_CONTEXT_BIAS:-}
       - VEXA_AGENT_SRC_MOUNT=${VEXA_AGENT_SRC_MOUNT:-}
       - REDIS_URL=redis://redis:6379/0
       # The Runtime brokers model credentials into spawned agents. Subscription credentials may be

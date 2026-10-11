@@ -28,6 +28,7 @@
         "segment_id": { "type": "string", "description": "stable id: {session_uid}:{speaker_key}:{startMs}" },
         "speaker": { "type": "string", "description": "display name (glow-bound or a provisional label)" },
         "speaker_key": { "type": "string", "description": "per-channel turn key" },
+        "speaker_id": { "type": "string", "description": "the platform's participant id behind speaker (Google Meet: data-participant-id)" },
         "text": { "type": "string" },
         "start": { "type": "number" },
         "end": { "type": "number" },

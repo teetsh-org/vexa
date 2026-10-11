@@ -146,6 +146,8 @@ def default_registry() -> ProfileRegistry:
             "VEXA_VIDEO_RECORDING",
             "ENCODE_H264",
             "VIDEO_HEIGHT",
+            # STT domain vocabulary (bot pipeline.ts createTranscribe → context_bias).
+            "TRANSCRIPTION_CONTEXT_BIAS",
         )
         if os.environ.get(key, "").strip()
     }

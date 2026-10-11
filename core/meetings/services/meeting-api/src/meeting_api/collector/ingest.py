@@ -98,6 +98,8 @@ def _coerce_segment(raw: dict) -> Optional[dict]:
         # name. Preserve it in the live hash so downstream policy can distinguish Teams CSRC rows
         # without parsing human labels or widening behavior for every source='merged' producer.
         "speaker_key": raw.get("speaker_key"),
+        # The platform's participant id behind the display name (two people may share a name).
+        "speaker_id": raw.get("speaker_id"),
         "completed": completed,
         "source": source,
         "absolute_start_time": raw.get("absolute_start_time"),

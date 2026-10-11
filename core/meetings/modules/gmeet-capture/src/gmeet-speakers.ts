@@ -37,6 +37,11 @@ export interface GmeetSpeakersOptions {
    *  (the data-self-name marker can render late). Lets the channel binder pin a sticky
    *  self name it refuses to bind to any remote channel — the leak-proof backstop. */
   onSelf?: (name: string) => void;
+  /** A participant's label, reported when it is first assigned (or changes). Every name this module
+   *  emits is a LABEL unique per Meet participant: the display name, suffixed " (2)", " (3)"… when
+   *  another participant already holds that name — two people (or one person on two devices) called
+   *  "Thibault" never share a speaker. `participantId` is Meet's data-participant-id. */
+  onParticipant?: (label: string, participantId: string) => void;
   /** Log sink (defaults to console.log). */
   log?: (msg: string) => void;
   /** Poll interval (ms). Default 500. */
@@ -45,6 +50,7 @@ export interface GmeetSpeakersOptions {
 
 export interface GmeetTileInfo {
   id: string;
+  /** The participant's label (see onParticipant), null when the tile shows no usable name. */
   name: string | null;
   self: boolean;
   speaking: boolean;
@@ -67,6 +73,8 @@ export interface GmeetSpeakers {
    *  glow name at the chunk's capture time. Still RAW signal extraction: it reports
    *  who Meet renders as speaking; it does not itself attach a name to audio. */
   litNames(): string[];
+  /** Meet's data-participant-id behind a label, when that label has been assigned. */
+  participantIdOf(label: string): string | null;
   /** One-shot structural dump of the live Meet DOM — for designing a robust,
    *  non-obfuscated speaking/naming signal. Read-only; no side effects. */
   probeDom(): GmeetDomProbe;
@@ -106,6 +114,21 @@ export function createGmeetSpeakers(opts: GmeetSpeakersOptions = {}): GmeetSpeak
   /** Names currently lit (non-self, named) — drives start/stop hint edges. */
   const speakingNow = new Set<string>();
   const reportedSelf = new Set<string>();   // self names already reported via onSelf (fire once each)
+  // participant id ↔ label, held for the whole meeting so a label never moves to someone else.
+  const labelById = new Map<string, { name: string; label: string }>();
+  const idByLabel = new Map<string, string>();
+
+  function labelFor(id: string, name: string): string {
+    const known = labelById.get(id);
+    if (known && known.name === name) return known.label;
+    if (known) idByLabel.delete(known.label);              // renamed: release the old label
+    let label = name;
+    for (let k = 2; idByLabel.has(label); k++) label = `${name} (${k})`;
+    labelById.set(id, { name, label });
+    idByLabel.set(label, id);
+    try { opts.onParticipant?.(label, id); } catch { /* consumer error */ }
+    return label;
+  }
 
   // ── DOM reading ─────────────────────────────────────────────────
 
@@ -162,7 +185,7 @@ export function createGmeetSpeakers(opts: GmeetSpeakersOptions = {}): GmeetSpeak
         if (!id || seen.has(id)) return;
         seen.add(id);
         const name = tileName(el);
-        out.push({ id, name, self: isSelf(el, id, selfId), speaking: tileSpeaking(el) });
+        out.push({ id, name: name && labelFor(id, name), self: isSelf(el, id, selfId), speaking: tileSpeaking(el) });
       });
     }
     return out;
@@ -214,6 +237,7 @@ export function createGmeetSpeakers(opts: GmeetSpeakersOptions = {}): GmeetSpeak
       };
     },
     litNames(): string[] { return [...speakingNow]; },
+    participantIdOf(label: string): string | null { return idByLabel.get(label) ?? null; },
     probeDom(): GmeetDomProbe {
       // The captured elements are <audio> AND <video> with audio tracks (same set
       // gmeet-capture taps). For each, run the co-location test against its tile.

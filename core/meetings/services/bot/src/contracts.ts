@@ -140,6 +140,8 @@ export interface TranscriptSegment {
   segment_id: string;
   speaker: string;
   speaker_key?: string;
+  /** The platform's participant id behind `speaker` (Google Meet: data-participant-id). */
+  speaker_id?: string;
   text: string;
   start: number;
   end: number;

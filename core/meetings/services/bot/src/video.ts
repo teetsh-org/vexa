@@ -9,10 +9,61 @@
  *
  * Encoding is configured by @vexa/recording's VideoRecordingService env (ENCODE_H264, VIDEO_HEIGHT,
  * VIDEO_HWACCEL). The upload happens once, at teardown, inside the bot's SIGTERM grace.
+ *
+ * The display is filmed as-is, so `stageMeetingForVideo` first makes it a clean stage: the browser
+ * window full screen (no tab strip, address bar, infobar or WM toolbar in frame) and, on Google
+ * Meet, the bot's own tile and Meet's device-warning popovers made invisible. Hiding is visual
+ * only (visibility/opacity): the DOM stays intact for speaker detection and for the leave flow.
  */
 import * as fs from 'fs';
 import { VideoRecordingService } from '@vexa/recording';
+import type { Page } from '@vexa/remote-browser';
 import type { Invocation } from './config.js';
+
+export const videoRecordingEnabled = (): boolean => process.env.VEXA_VIDEO_RECORDING === '1';
+
+/** Full-screen the bot's browser window and keep the bot's own UI out of frame. Never throws. */
+export async function stageMeetingForVideo(page: Page, inv: Invocation, log: (msg: string) => void): Promise<void> {
+  try {
+    const cdp = await page.context().newCDPSession(page);
+    const { windowId } = await cdp.send('Browser.getWindowForTarget');
+    await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'fullscreen' } });
+    await cdp.detach().catch(() => { /* already gone */ });
+  } catch (e) {
+    log(`video: full-screen failed: ${String(e)}`);
+  }
+  if (inv.platform !== 'google_meet') return;
+  await page.evaluate(() => {
+    // Runs page-side; the bot compiles without the DOM lib, hence the untyped globals.
+    const g = globalThis as any;
+    const doc = g.document;
+    if (g.__vexaVideoStage) return;
+    // Meet's device warnings ("Camera not found", "Microphone not found"): the bot has no devices
+    // by design, so the warning is noise in every frame it covers.
+    const DEVICE_WARNING = /(camera|microphone|caméra|micro)[^.]{0,40}(not found|introuvable|aucun)|(no|aucune?) (camera|microphone|caméra|micro)/i;
+    const hideSelf = (): void => {
+      const tile = doc.querySelector('[data-self-name]')?.closest('[data-participant-id]');
+      if (tile && tile.style.visibility !== 'hidden') tile.style.setProperty('visibility', 'hidden', 'important');
+    };
+    const hideDeviceWarnings = (): void => {
+      const walker = doc.createTreeWalker(doc.body, g.NodeFilter.SHOW_TEXT);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        if (!DEVICE_WARNING.test(n.textContent || '')) continue;
+        // The popover is the outermost floating (fixed/absolute) ancestor that is still popover-sized
+        // — never the call layout, whose containers are positioned too.
+        const maxArea = g.innerWidth * g.innerHeight / 4;
+        let popover: any = null;
+        for (let el = n.parentElement; el && el !== doc.body; el = el.parentElement) {
+          const pos = g.getComputedStyle(el).position;
+          const r = el.getBoundingClientRect();
+          if ((pos === 'fixed' || pos === 'absolute') && r.width * r.height < maxArea) popover = el;
+        }
+        popover?.style.setProperty('opacity', '0', 'important');
+      }
+    };
+    g.__vexaVideoStage = setInterval(() => { try { hideSelf(); hideDeviceWarnings(); } catch { /* next tick */ } }, 1000);
+  }).catch((e) => log(`video: stage script failed: ${String(e)}`));
+}
 
 export interface BotVideoRecording {
   /** One audio recording chunk, in seq order — appended to the local copy muxed at the end. */
@@ -25,7 +76,7 @@ export interface BotVideoRecording {
 
 /** Starts filming when VEXA_VIDEO_RECORDING=1; returns null (no video) otherwise. */
 export function startBotVideoRecording(inv: Invocation, log: (msg: string) => void): BotVideoRecording | null {
-  if (process.env.VEXA_VIDEO_RECORDING !== '1') return null;
+  if (!videoRecordingEnabled()) return null;
   const sessionUid = inv.connectionId ?? '';
   const video = new VideoRecordingService(inv.meeting_id ?? 0, sessionUid);
   const audioPath = `/tmp/video_audio_${sessionUid || 'session'}.webm`;

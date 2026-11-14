@@ -593,10 +593,11 @@ export async function launchBrowser(inv: Invocation): Promise<BrowserSession> {
 
   // getAuthenticatedBrowserArgs() is the minimal clean set remote-browser uses for signed-in
   // joins; getJoinBrowserArgs() adds the fake-device / autoplay flags the join lane needs. The
-  // join args win on conflict (later wins in Chromium arg parsing).
+  // join args win on conflict (later wins in Chromium arg parsing), except --incognito: an
+  // authenticated bot needs the restored profile's cookies, which an incognito window ignores.
   const args = [
     ...getAuthenticatedBrowserArgs(),
-    ...getJoinBrowserArgs(),
+    ...getJoinBrowserArgs().filter((a) => !(inv.authenticated && a === '--incognito')),
     // A filmed display must not carry Chrome's "unsupported command-line flag" infobar.
     ...(videoRecordingEnabled() ? ['--test-type'] : []),
   ];

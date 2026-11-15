@@ -815,10 +815,13 @@ export class SpeakerStreamManager {
     buffer.lastWords = [];
     if (this.callbackStampedFrames) buffer.windowStartMs = retainedStartMs;
     else buffer.windowStartMs += advancedMs;
-    // The window moved on; the prior pending draft (under the OLD windowStartMs) is superseded.
-    // Drop the in-memory tracking so a later turn-close finalize can't re-emit this stale window's
-    // text. We don't clear the consumer's draft row here (mid-stream) to avoid a live-edge flicker —
-    // the next submission republishes the forming draft under the new id, and turn-close finalizes it.
+    // The window moved on; a draft still outstanding under the OLD windowStartMs is superseded (every
+    // segment it covered was confirmed under other ids or filtered). Withdraw its row — consumers key
+    // drafts by id, so the next draft (under the new id) never replaces it — and drop the tracking so
+    // a later turn-close finalize can't re-emit this stale window's text.
+    if (buffer.pendingDraftText && this.onSegmentPending) {
+      this.onSegmentPending(buffer.speakerId, buffer.speakerName, '', buffer.pendingDraftStartMs);
+    }
     buffer.pendingDraftText = '';
 
     log(`[SpeakerStreams] Offset advanced for "${buffer.speakerName}" (confirmed=${buffer.confirmedSamples}, total=${buffer.totalSamples}, trimmed to ${buffer.chunks.length} chunks)`);

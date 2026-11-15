@@ -12,8 +12,10 @@
  *
  * The display is filmed as-is, so `stageMeetingForVideo` first makes it a clean stage: the browser
  * window full screen (no tab strip, address bar, infobar or WM toolbar in frame) and, on Google
- * Meet, the bot's own tile and Meet's device-warning popovers made invisible. Hiding is visual
- * only (visibility/opacity): the DOM stays intact for speaker detection and for the leave flow.
+ * Meet, only the participant grid left visible: the bot's own tile, Meet's chrome around the grid
+ * (top bar, control bar, toasts, side panels) and its device-warning popovers are made invisible.
+ * Hiding is visual only (visibility/opacity): the DOM stays intact for speaker detection and for
+ * the leave flow, whose buttons stay clickable.
  */
 import * as fs from 'fs';
 import { VideoRecordingService } from '@vexa/recording';
@@ -78,7 +80,33 @@ export async function stageMeetingForVideo(page: Page, inv: Invocation, log: (ms
         popover?.style.setProperty('opacity', '0', 'important');
       }
     };
-    g.__vexaVideoStage = setInterval(() => { try { hideSelf(); hideDeviceWarnings(); } catch { /* next tick */ } }, 1000);
+    // Meet's chrome: everything beside the grid — the siblings of the smallest element holding every
+    // other participant's tile and of each of its ancestors. Recomputed each tick, since the grid
+    // moves as people join and leave; an element that falls back inside it is shown again.
+    const CHROME = 'data-vexa-chrome';
+    const hideChrome = (): void => {
+      const self = new Set(selfTiles());
+      const tiles = Array.from(doc.querySelectorAll('[data-participant-id]')).filter((t: any) => !self.has(t));
+      if (!tiles.length) return;
+      let stage: any = tiles[0];
+      while (stage && !tiles.every((t: any) => stage.contains(t))) stage = stage.parentElement;
+      if (!stage) return;
+      const chrome = new Set<any>();
+      for (let el = stage; el && el !== doc.body && el.parentElement; el = el.parentElement) {
+        for (const sibling of Array.from(el.parentElement.children)) if (sibling !== el) chrome.add(sibling);
+      }
+      for (const el of Array.from(doc.querySelectorAll(`[${CHROME}]`)) as any[]) {
+        if (chrome.has(el)) continue;
+        el.removeAttribute(CHROME);
+        el.style.removeProperty('opacity');
+      }
+      for (const el of chrome) {
+        if (el.hasAttribute(CHROME) || el.tagName === 'SCRIPT' || el.tagName === 'STYLE') continue;
+        el.setAttribute(CHROME, '');
+        el.style.setProperty('opacity', '0', 'important');
+      }
+    };
+    g.__vexaVideoStage = setInterval(() => { try { hideSelf(); hideChrome(); hideDeviceWarnings(); } catch { /* next tick */ } }, 1000);
   }, inv.botName ?? '').catch((e) => log(`video: stage script failed: ${String(e)}`));
 }
 

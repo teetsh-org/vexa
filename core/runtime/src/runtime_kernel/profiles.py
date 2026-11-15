@@ -148,6 +148,7 @@ def default_registry() -> ProfileRegistry:
             "VIDEO_HEIGHT",
             # STT domain vocabulary (bot pipeline.ts createTranscribe → context_bias).
             "TRANSCRIPTION_CONTEXT_BIAS",
+            "TRANSCRIPTION_TIMESTAMP_GRANULARITY",
         )
         if os.environ.get(key, "").strip()
     }

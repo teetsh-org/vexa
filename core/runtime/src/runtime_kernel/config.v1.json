@@ -185,6 +185,13 @@
    "targets": ["compose"]
   },
   {
+   "key": "TRANSCRIPTION_TIMESTAMP_GRANULARITY",
+   "class": "defaulted",
+   "default": "(unset — word)",
+   "description": "timestamp_granularities sent to the STT backend: word (Whisper-style phrase segments with nested words) or segment (Mistral Voxtral, whose word granularity returns one segment per word); forwarded to spawned bots",
+   "targets": ["compose"]
+  },
+  {
    "key": "BOT_SPEAKER_MIN_AUDIO_SEC",
    "class": "defaulted",
    "default": "(unset — bot default)",

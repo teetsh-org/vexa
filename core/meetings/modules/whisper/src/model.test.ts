@@ -71,6 +71,16 @@ async function run() {
     check('json-only response remains a valid transcription result', first.text === 'voxtral ok', `text=${JSON.stringify(first.text)}`);
   }
 
+  // timestamp_granularities: word unless configured; Mistral Voxtral takes segment.
+  {
+    const granularityOf = (b: string) => b.match(/name="timestamp_granularities"\r\n\r\n([^\r]*)\r\n/)?.[1] ?? null;
+    const body = captureFetch();
+    await new TranscriptionClient({ serviceUrl: 'http://stt.test' }).transcribe(pcm, 'en');
+    check('unconfigured → timestamp_granularities=word', granularityOf(body()) === 'word', `got ${JSON.stringify(granularityOf(body()))}`);
+    await new TranscriptionClient({ serviceUrl: 'http://stt.test', timestampGranularity: 'segment' }).transcribe(pcm, 'en');
+    check('configured segment rides the timestamp_granularities part', granularityOf(body()) === 'segment', `got ${JSON.stringify(granularityOf(body()))}`);
+  }
+
   (globalThis as any).fetch = realFetch;
   if (failed) { console.error(`\n❌ stt model: ${failed} check(s) FAILED.`); process.exit(1); }
   console.log('\n✅ stt model (P5, #522): configured model ids reach the wire; json-only OpenAI-compatible backends negotiate once.');

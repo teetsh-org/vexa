@@ -53,6 +53,10 @@ export interface TranscriptionClientConfig {
   /** Domain vocabulary sent as repeated `context_bias` form parts (Mistral Voxtral): spellings the
    *  model should prefer for names and jargon ("Teetsh", "LSU"). Backends without the field ignore it. */
   contextBias?: string[];
+  /** The `timestamp_granularities` form part. "word" (default) suits Whisper-style backends, which
+   *  return phrase segments with their words nested inside; Mistral Voxtral answers "word" with one
+   *  segment per word and no phrases, so it takes "segment". */
+  timestampGranularity?: 'word' | 'segment';
 }
 
 /** The STT boundary's FAILURE vocabulary (P5 + P18: an adapter must translate the
@@ -107,6 +111,7 @@ export class TranscriptionClient {
   private minSilenceDurationMs: number | undefined;
   private model: string;
   private contextBias: string[];
+  private timestampGranularity: 'word' | 'segment';
   private responseFormat: 'verbose_json' | 'json' = 'verbose_json';
   constructor(config: TranscriptionClientConfig) {
     // Ensure serviceUrl ends with the transcriptions endpoint
@@ -123,6 +128,7 @@ export class TranscriptionClient {
     this.minSilenceDurationMs = config.minSilenceDurationMs;
     this.model = config.model ?? 'whisper-1';
     this.contextBias = (config.contextBias ?? []).map(t => t.trim()).filter(Boolean);
+    this.timestampGranularity = config.timestampGranularity ?? 'word';
   }
 
   /**
@@ -209,11 +215,10 @@ export class TranscriptionClient {
       ));
     }
 
-    // Request word-level timestamps
     parts.push(Buffer.from(
       `--${boundary}\r\n` +
       `Content-Disposition: form-data; name="timestamp_granularities"\r\n\r\n` +
-      `word\r\n`
+      `${this.timestampGranularity}\r\n`
     ));
 
     // Max speech segment duration (controls how often Whisper splits segments)

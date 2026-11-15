@@ -426,6 +426,8 @@ export function createTranscribe(inv: Invocation): Transcribe {
     model: inv.transcriptionModel ?? undefined,
     // Deployment vocabulary (comma-separated), e.g. "Teetsh,LSU" — forwarded by the runtime.
     contextBias: (process.env.TRANSCRIPTION_CONTEXT_BIAS ?? '').split(','),
+    // "segment" for Mistral Voxtral, whose word granularity has no phrase segments.
+    timestampGranularity: process.env.TRANSCRIPTION_TIMESTAMP_GRANULARITY === 'segment' ? 'segment' : 'word',
   });
   const language = inv.language ?? undefined;
   return (pcm, prompt) => client.transcribe(pcm, language, prompt);

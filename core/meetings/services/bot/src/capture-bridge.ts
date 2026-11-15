@@ -1416,7 +1416,7 @@ export async function startRecording(page: Page, inv: Invocation, recording: Bot
     recording.chunk(key, chunkSeq, isFinal, format, bytes);
     video?.audioChunk(bytes);
   }).catch((e: Error) => { if (!String(e.message).includes('already registered')) throw e; });
-  await page.exposeFunction('__vexaRecordingStarted', (): void => { video?.audioStarted(); })
+  await page.exposeFunction('__vexaRecordingStarted', (): void => { recording.started(); video?.audioStarted(); })
     .catch((e: Error) => { if (!String(e.message).includes('already registered')) throw e; });
 
   // Page-side: start the generic recording tap (finds + combines the page audio elements).

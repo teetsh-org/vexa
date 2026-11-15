@@ -226,9 +226,13 @@ export class RecordingService {
     chunkSeq: number,
     isFinal: boolean,
     format: string = 'webm',
+    startedAtMs?: number,
   ): Promise<void> {
     const uploadTimeoutMs = 30_000;
-    const durationSeconds = this.startTime > 0 ? (Date.now() - this.startTime) / 1000 : undefined;
+    // duration_seconds is the recording's length so far: from the tap's start (startedAtMs, epoch ms)
+    // when the caller streams chunks, from start() on the WAV-file path.
+    const since = startedAtMs ?? (this.startTime > 0 ? this.startTime : undefined);
+    const durationSeconds = since !== undefined ? (Date.now() - since) / 1000 : undefined;
 
     const boundary = `----VexaRecordingChunk${Date.now()}${chunkSeq}`;
     const metadata = JSON.stringify({

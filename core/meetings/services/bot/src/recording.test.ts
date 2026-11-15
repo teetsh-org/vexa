@@ -33,11 +33,11 @@ const inv = (over: Partial<Invocation> = {}): Invocation => ({
 });
 
 /** A record of one delivered chunk (what the injected uploader saw). */
-interface Seen { seq: number; isFinal: boolean; format: string; len: number }
+interface Seen { seq: number; isFinal: boolean; format: string; len: number; startedAtMs?: number }
 function fakeUploader(): { seen: Seen[]; upload: ChunkUploader } {
   const seen: Seen[] = [];
-  const upload: ChunkUploader = (seq, isFinal, format, bytes) => {
-    seen.push({ seq, isFinal, format, len: bytes.length });
+  const upload: ChunkUploader = (seq, isFinal, format, bytes, startedAtMs) => {
+    seen.push({ seq, isFinal, format, len: bytes.length, startedAtMs });
   };
   return { seen, upload };
 }
@@ -123,9 +123,30 @@ async function main(): Promise<void> {
     check('empty session: close is a no-op (no upload)', seen.length === 0, String(seen.length));
   }
 
+  // ── 6b) started() pins t=0: every later chunk (and the close fallback) carries the same start ──
+  {
+    const { seen, upload } = fakeUploader();
+    const sink = createBotRecordingSink({ inv: inv(), uploadChunk: upload });
+    sink.chunk('google_meet/s', 0, false, 'webm', new Uint8Array([1]));
+    await flush();
+    const before = Date.now();
+    sink.started();
+    const after = Date.now();
+    await new Promise((r) => setTimeout(r, 5));
+    sink.started();
+    sink.chunk('google_meet/s', 1, false, 'webm', new Uint8Array([2]));
+    sink.close('google_meet/s');
+    await flush();
+    check('started: a chunk before started() carries no start', seen[0]?.startedAtMs === undefined, JSON.stringify(seen[0]));
+    const t0 = seen[1]?.startedAtMs;
+    check('started: later chunks carry the tap start', t0 !== undefined && t0 >= before && t0 <= after, JSON.stringify(seen));
+    check('started: the close fallback final carries the same start, a second started() does not move it',
+      seen.length === 3 && seen[2].isFinal && seen[2].startedAtMs === t0, JSON.stringify(seen));
+  }
+
   // ── 7) the DEFAULT uploader on the real RecordingService HTTP wire: session_uid == connectionId ──
   {
-    interface Wire { session_uid?: string; chunk_seq?: number; is_final?: boolean; format?: string; size?: number }
+    interface Wire { session_uid?: string; chunk_seq?: number; is_final?: boolean; format?: string; size?: number; duration?: number }
     const wire: Wire[] = [];
     const server = http.createServer((req, res) => {
       const parts: Buffer[] = [];
@@ -138,7 +159,7 @@ async function main(): Promise<void> {
         wire.push({
           session_uid: meta.session_uid as string, chunk_seq: meta.chunk_seq as number,
           is_final: meta.is_final as boolean, format: meta.format as string,
-          size: meta.file_size_bytes as number,
+          size: meta.file_size_bytes as number, duration: meta.duration_seconds as number,
         });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok' }));
@@ -150,6 +171,7 @@ async function main(): Promise<void> {
     const sink = createBotRecordingSink({
       inv: inv({ connectionId: 'conn-xyz', meeting_id: 42, recordingUploadUrl: url, internalSecret: 's' }),
     });
+    sink.started();
     sink.chunk('google_meet/w', 0, false, 'webm', new Uint8Array([1, 2, 3, 4]));
     sink.chunk('google_meet/w', 1, false, 'webm', new Uint8Array([5, 6]));
     sink.chunk('google_meet/w', 2, true, 'webm', new Uint8Array(0));
@@ -163,6 +185,9 @@ async function main(): Promise<void> {
     check('wire: seq order 0,1,2', wire.map((w) => w.chunk_seq).join(',') === '0,1,2', wire.map((w) => w.chunk_seq).join(','));
     check('wire: only the LAST chunk is_final', wire.map((w) => w.is_final).join(',') === 'false,false,true',
       wire.map((w) => w.is_final).join(','));
+    check('wire: every chunk carries a duration_seconds counted from started()',
+      wire.length === 3 && wire.every((w) => typeof w.duration === 'number' && w.duration >= 0 && w.duration < 5),
+      JSON.stringify(wire.map((w) => w.duration)));
   }
 
   if (failed) { console.error(`\n❌ recording (L3): ${failed} check(s) FAILED.`); process.exit(1); }

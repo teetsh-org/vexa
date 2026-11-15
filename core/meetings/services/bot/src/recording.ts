@@ -39,12 +39,15 @@ import type { RecordingSink } from './ports.js';
 export interface BotRecordingSink extends RecordingSink {
   /** One recording.v1 chunk for `key`: monotonic seq, the COMPLETED-signal flag, format, bytes. */
   chunk(key: string, seq: number, isFinal: boolean, format: RecordingMasterFormat, bytes: Uint8Array): void;
+  /** The page-side tap began recording: every chunk's duration_seconds counts from this moment. */
+  started(): void;
 }
 
 /** Deliver ONE recording.v1 chunk. The default uploads to inv.recordingUploadUrl via
- *  RecordingService.uploadChunk; tests inject a fake to assert per-chunk delivery without HTTP. */
+ *  RecordingService.uploadChunk; tests inject a fake to assert per-chunk delivery without HTTP.
+ *  `startedAtMs` is when the tap began recording (epoch ms), undefined if it never said. */
 export type ChunkUploader = (
-  seq: number, isFinal: boolean, format: RecordingMasterFormat, bytes: Uint8Array,
+  seq: number, isFinal: boolean, format: RecordingMasterFormat, bytes: Uint8Array, startedAtMs?: number,
 ) => void | Promise<void>;
 
 export interface RecordingSinkOptions {
@@ -64,12 +67,12 @@ function defaultChunkUploader(inv: Invocation, log: (m: string) => void): ChunkU
   const sessionUid = inv.connectionId ?? '';
   const token = inv.internalSecret ?? '';
   const svc = new RecordingService(meetingId, sessionUid);
-  return async (seq, isFinal, format, bytes) => {
+  return async (seq, isFinal, format, bytes, startedAtMs) => {
     if (!url) {
       log(`recording: no recordingUploadUrl — chunk ${seq} (${bytes.length}B, isFinal=${isFinal}) NOT uploaded`);
       return;
     }
-    await svc.uploadChunk(url, token, Buffer.from(bytes), seq, isFinal, format);
+    await svc.uploadChunk(url, token, Buffer.from(bytes), seq, isFinal, format, startedAtMs);
   };
 }
 
@@ -86,6 +89,7 @@ export function createBotRecordingSink(opts: RecordingSinkOptions): BotRecording
   let finalSent = false;                               // has an is_final chunk been sent? (fallback guard)
   let maxSeq = -1;                                     // highest seq seen → the fallback's seq
   let lastFormat: RecordingMasterFormat = 'webm';      // format for the empty-final fallback
+  let startedAtMs: number | undefined;                 // the tap's t=0 → every chunk's duration
 
   const enqueue = (seq: number, isFinal: boolean, format: RecordingMasterFormat, bytes: Uint8Array): void => {
     anyChunk = true;
@@ -93,12 +97,13 @@ export function createBotRecordingSink(opts: RecordingSinkOptions): BotRecording
     if (seq > maxSeq) maxSeq = seq;
     lastFormat = format;
     queue = queue
-      .then(() => upload(seq, isFinal, format, bytes))
+      .then(() => upload(seq, isFinal, format, bytes, startedAtMs))
       .catch((e) => { log(`recording: chunk ${seq} (isFinal=${isFinal}) upload failed — continuing: ${String(e)}`); });
   };
 
   return {
     chunk: (_key, seq, isFinal, format, bytes) => { enqueue(seq, isFinal, format, bytes); },
+    started: () => { startedAtMs ??= Date.now(); },
     close: (_key) => {
       // Final-signal FALLBACK: if the live Stop race dropped the trailing is_final chunk, send one
       // empty is_final so the server flips the recording COMPLETED. No-op for a never-fed session

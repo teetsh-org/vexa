@@ -797,6 +797,10 @@ export async function startCaptureBridge(
   await page.exposeFunction('__vexaStreamPresence', (count: number): void => activity?.observeStreamPresence?.(count)).catch((e: Error) => {
     if (!String(e.message).includes('already registered')) throw e;
   });
+  // gmeet: how many other people's tiles the page shows (participant-presence aloneness).
+  await page.exposeFunction('__vexaOthersPresent', (count: number): void => activity?.observeOthers?.(count)).catch((e: Error) => {
+    if (!String(e.message).includes('already registered')) throw e;
+  });
   // jitsi chat → the embedder's sink (a transcript.v1 `chat` segment at the composition root).
   await page.exposeFunction('__vexaChatMessage', (sender: string, text: string): void => {
     try { onChat?.(sender, text); } catch (e) { console.error(`[bot] chat sink rejected: ${String(e)}`); }
@@ -1303,6 +1307,22 @@ export async function startCaptureBridge(
       });
       await w.__vexaGmeetCapture.start();
       await w.__vexaRemoteAudioReady?.();
+      // Who else is in the call, for aloneness: named tiles that are not the bot's own (Meet's self
+      // marker, else the bot's name, as the video stage finds it). An unnamed tile is not counted.
+      if (!w.__vexaOthersTimer) {
+        let lastOthers = -1;
+        w.__vexaOthersTimer = (globalThis as any).setInterval(() => {
+          try {
+            const tiles: Array<{ name: string | null; self: boolean }> = w.__vexaGmeetSpeakers?.getState?.()?.tiles ?? [];
+            const others = tiles.filter(t => !t.self && !!t.name && !(botName && t.name.includes(botName))).length;
+            if (others !== lastOthers) {
+              w.logBot?.(`[Presence] others in the call: ${others} (tiles=${tiles.length})`);
+              lastOthers = others;
+            }
+            w.__vexaOthersPresent?.(others);
+          } catch { /* next tick */ }
+        }, 2000);
+      }
     }
   }, { isMixed: mixed, isPerTrack: perTrack, isJitsi: jitsi, isTeams: inv.platform === 'teams', isZoom: inv.platform === 'zoom', botName: inv.botName,
       // How long the Teams lane waits for the server mix before capturing every track instead.
@@ -1328,6 +1348,7 @@ export async function startCaptureBridge(
     await page.evaluate(() => {
       const w = (globalThis as any) as Record<string, any>;
       try { w.__vexaGmeetCapture?.stop?.(); } catch { /* best-effort */ }
+      try { if (w.__vexaOthersTimer) { (globalThis as any).clearInterval(w.__vexaOthersTimer); w.__vexaOthersTimer = null; } } catch { /* */ }
       try { if (w.__vexaTeamsHealthTimer) { (globalThis as any).clearInterval(w.__vexaTeamsHealthTimer); w.__vexaTeamsHealthTimer = null; } } catch { /* */ }
       try { w.__vexaTeamsSpeakers?.destroy?.(); w.__vexaTeamsSpeakers = null; } catch { /* best-effort */ }
       // destroy() flushes a caption still mid-refinement as stable:false — the meeting's last

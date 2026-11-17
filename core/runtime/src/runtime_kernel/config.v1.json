@@ -157,6 +157,13 @@
    "targets": ["compose", "helm", "lite"]
   },
   {
+   "key": "BOT_ALONE_EMPTY_ROOM_MS",
+   "class": "defaulted",
+   "default": "(unset — off)",
+   "description": "gmeet: leave this long after the last other person's tile is gone (and the room is silent); people in the call then hold the bot through silence, up to 30 minutes; forwarded to spawned bots",
+   "targets": ["compose"]
+  },
+  {
    "key": "VEXA_VIDEO_RECORDING",
    "class": "defaulted",
    "default": "(unset — off)",

@@ -36,7 +36,14 @@ import { createCaptureSignalRecorder, startBotLogSidecar, wrapTranscribeWithTap,
 import { uploadSignalTapes } from './signal-upload.js';
 import { createSttFaultReporter } from './stt-faults.js';
 import { launchBrowser, startCaptureBridge, startRecording, restartMixedCapture, createSpeakController, type BrowserSession, type SpeakController } from './capture-bridge.js';
-import { createRemoteAudioActivityTap, createSilenceAlonenessSource, resolveAloneSilenceWindowMs } from './aloneness.js';
+import {
+  createParticipantPresenceAdapter,
+  createRemoteAudioActivityTap,
+  createSilenceAlonenessSource,
+  deafCaptureGuardAdapter,
+  resolveAloneEmptyRoomMs,
+  resolveAloneSilenceWindowMs,
+} from './aloneness.js';
 import { installSignalHandlers } from './signals.js';
 import type {
   JoinDriver,
@@ -223,12 +230,17 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<number
   // the browser exists, and the restart needs the live page. Unset until the session launches
   // (and after a launch failure), in which case the guard just holds and keeps checking.
   let restartCapture: (() => void) | undefined;
+  const aloneEmptyRoomMs = resolveAloneEmptyRoomMs(env);
   const aloneness = createSilenceAlonenessSource({
     activity: remoteAudioActivity,
     windowMs: aloneSilenceWindowMs,
+    adapters: aloneEmptyRoomMs !== undefined
+      ? [createParticipantPresenceAdapter({ emptyMs: aloneEmptyRoomMs }), deafCaptureGuardAdapter]
+      : undefined,
     onCaptureFault: () => restartCapture?.(),
   });
-  console.log(`[bot] aloneness: silence adapter + deaf-capture guard enabled (window_ms=${aloneSilenceWindowMs})`);
+  console.log(`[bot] aloneness: ${aloneEmptyRoomMs !== undefined ? `participant rule (empty_room_ms=${aloneEmptyRoomMs}) over ` : ''}`
+    + `silence adapter + deaf-capture guard enabled (window_ms=${aloneSilenceWindowMs})`);
   if (speakerStreamConfig) console.log(`[bot] speaker-stream tuning enabled: ${JSON.stringify(speakerStreamConfig)}`);
 
   try {

@@ -44,6 +44,13 @@ export interface RemoteAudioActivitySnapshot {
    *  remote track legitimately flaps `muted` between talk spurts (DTX): a bot must not conclude the
    *  room emptied because it sampled the gap. */
   streamsPresentAt?: number;
+  /** Other people the page sees in the call (gmeet: named tiles that are not the bot's own). */
+  othersCount?: number;
+  /** When the last report of other people, of any count, arrived (staleness check). */
+  othersObservedAt?: number;
+  /** When the last report of at least one other person arrived. `undefined` = never seen anyone,
+   *  so the count is not trusted to mean "everyone left". */
+  othersPresentAt?: number;
 }
 
 export interface RemoteAudioActivitySource {
@@ -62,6 +69,9 @@ export interface RemoteAudioActivityTap extends RemoteAudioActivitySource {
    *  unknown), and a tap that does not implement it — a test double, an embedder's own — keeps
    *  compiling and keeps today's behaviour. */
   observeStreamPresence?(count: number): void;
+  /** Page-side report: how many OTHER people are in the call right now (gmeet tiles). Optional,
+   *  like stream presence: a lane that never reports it keeps the silence rule alone. */
+  observeOthers?(count: number): void;
 }
 
 /** `capture-fault` = "these streams are connected and we are hearing NOTHING from them" — the bot is
@@ -113,6 +123,19 @@ export function createRemoteAudioActivityTap(options: {
         streamsConnected: state.streamsConnected,
         streamsObservedAt: state.streamsObservedAt,
         streamsPresentAt: state.streamsPresentAt,
+        othersCount: state.othersCount,
+        othersObservedAt: state.othersObservedAt,
+        othersPresentAt: state.othersPresentAt,
+      };
+    },
+    observeOthers(count: number): void {
+      if (!Number.isFinite(count) || count < 0) return;
+      const at = now();
+      state = {
+        ...state,
+        othersCount: count,
+        othersObservedAt: at,
+        othersPresentAt: count > 0 ? at : state.othersPresentAt,
       };
     },
     observeStreamPresence(count: number): void {
@@ -138,6 +161,55 @@ export const silenceAlonenessAdapter: AlonenessAdapter = {
     return now - snapshot.lastRemoteAudioAt >= windowMs ? 'alone' : 'not-alone';
   },
 };
+
+export const DEFAULT_PRESENT_SILENCE_BACKSTOP_MS = 30 * 60 * 1000;
+
+/**
+ * People in the call decide, silence is the fallback. On gmeet silence is otherwise the only
+ * signal, so a quiet minute among people reads as an empty room, and an emptied room is only left
+ * once the whole silence window has run out.
+ *
+ * With a fresh count, after at least one other person has been seen:
+ *   - nobody else for `emptyMs`, and no remote audio for as long: alone;
+ *   - someone there: not alone, unless no remote audio for `presentSilenceMs` (a stuck tile must
+ *     not hold the bot until the time cap).
+ * Without one (never reported, never anyone, or stale): the silence adapter's verdict.
+ */
+export function createParticipantPresenceAdapter(options: {
+  emptyMs: number;
+  presentSilenceMs?: number;
+  stalenessMs?: number;
+}): AlonenessAdapter {
+  const presentSilenceMs = options.presentSilenceMs ?? DEFAULT_PRESENT_SILENCE_BACKSTOP_MS;
+  const stalenessMs = options.stalenessMs ?? DEFAULT_STREAM_PRESENCE_STALENESS_MS;
+  return {
+    name: 'participant-presence',
+    evaluate(snapshot, now, windowMs): AlonenessVerdict {
+      const fallback = silenceAlonenessAdapter.evaluate(snapshot, now, windowMs);
+      if (fallback === 'unavailable' || snapshot.lastRemoteAudioAt === undefined) return fallback;
+      if (snapshot.othersObservedAt === undefined || now - snapshot.othersObservedAt > stalenessMs) return fallback;
+      if (snapshot.othersPresentAt === undefined) return fallback;
+      const silentFor = now - snapshot.lastRemoteAudioAt;
+      if (snapshot.othersCount === 0 && now - snapshot.othersPresentAt >= options.emptyMs) {
+        return silentFor >= options.emptyMs ? 'alone' : 'not-alone';
+      }
+      return silentFor >= Math.max(presentSilenceMs, windowMs) ? 'alone' : 'not-alone';
+    },
+  };
+}
+
+/** `BOT_ALONE_EMPTY_ROOM_MS`: turns the participant rule on (unset = silence only, upstream). */
+export function resolveAloneEmptyRoomMs(
+  env: NodeJS.ProcessEnv = process.env,
+  warn: (message: string) => void = (message) => console.warn(`[bot] ${message}`),
+): number | undefined {
+  const raw = env.BOT_ALONE_EMPTY_ROOM_MS;
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const value = Number(raw);
+  if (Number.isFinite(value) && value > 0) return value;
+  warn(`BOT_ALONE_EMPTY_ROOM_MS=${JSON.stringify(raw)} is invalid; participant rule off`);
+  return undefined;
+}
 
 /**
  * The deaf-leave guard (#1192): connected streams delivering NOTHING are a broken capture chain,
@@ -291,7 +363,10 @@ export function createSilenceAlonenessSource(options: {
         captureFaultLoggedAt = null;
         fired = true;
         stop();
-        log(`aloneness: silence verdict (last_remote_audio_at=${snapshot.lastRemoteAudioAt}, window_ms=${options.windowMs})`);
+        log(`aloneness: silence verdict (last_remote_audio_at=${snapshot.lastRemoteAudioAt}, window_ms=${options.windowMs}`
+          + (snapshot.othersObservedAt !== undefined
+            ? `, others=${snapshot.othersCount}, last_others_at=${snapshot.othersPresentAt ?? 'never'})`
+            : ')'));
         callback();
       };
 

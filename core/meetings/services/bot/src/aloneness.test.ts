@@ -3,9 +3,11 @@ import {
   DEFAULT_ALONE_SILENCE_WINDOW_MS,
   DEFAULT_STREAM_PRESENCE_STALENESS_MS,
   createDeafCaptureGuardAdapter,
+  createParticipantPresenceAdapter,
   createRemoteAudioActivityTap,
   createSilenceAlonenessSource,
   deafCaptureGuardAdapter,
+  resolveAloneEmptyRoomMs,
   resolveAloneSilenceWindowMs,
   silenceAlonenessAdapter,
 } from './aloneness.js';
@@ -419,6 +421,104 @@ function fixture(windowMs = 1_000, extra: {
   check('a capture restart re-arms frame bookkeeping but keeps what the page said about the room',
     tap.snapshot().framesDelivered === 0 && tap.snapshot().lastRemoteFrameAt === undefined
     && tap.snapshot().streamsConnected === 0 && tap.snapshot().streamsPresentAt === 300);
+}
+
+// ── Participant presence (gmeet tiles): people in the call decide, silence is the fallback.
+// Window 2 s, empty room 0.5 s, backstop 5 s, reports stale after 1 s.
+{
+  const presence = (): ReturnType<typeof fixture> =>
+    fixture(2_000, { adapters: [createParticipantPresenceAdapter({ emptyMs: 500, presentSilenceMs: 5_000, stalenessMs: 1_000 }), deafCaptureGuardAdapter] });
+  const run = (f: ReturnType<typeof fixture>, ms: number, others?: number): void => {
+    for (let t = 0; t < ms; t += 250) {
+      f.clock.advance(250);
+      if (others !== undefined) f.activity.observeOthers(others);
+      f.scheduler.tick();
+    }
+  };
+
+  // 2026-11-17: someone in the call, one quiet minute, and the bot walked out.
+  {
+    const f = presence();
+    let fired = 0;
+    f.activity.ready();
+    f.activity.observeOthers(1);
+    f.source.onAlone(() => fired++);
+    run(f, 4_000, 1);
+    check('people in a silent call hold the bot past the silence window', fired === 0);
+    run(f, 1_000, 1);
+    check('…until the backstop', fired === 1, JSON.stringify(f.logs));
+  }
+  {
+    const f = presence();
+    let fired = 0;
+    f.activity.ready();
+    f.activity.observeOthers(1);
+    f.source.onAlone(() => fired++);
+    run(f, 250, 0);
+    check('an emptied room is not left at once', fired === 0);
+    run(f, 250, 0);
+    check('an emptied, silent room is left after emptyMs, well inside the silence window', fired === 1);
+    check('the verdict says what the bot saw',
+      f.logs.some((m) => m.includes('silence verdict') && m.includes('others=0') && m.includes('last_others_at=0')),
+      JSON.stringify(f.logs));
+  }
+  {
+    const f = presence();
+    let fired = 0;
+    f.activity.ready();
+    f.activity.observeOthers(1);
+    f.source.onAlone(() => fired++);
+    for (let t = 0; t < 1_000; t += 250) {
+      f.clock.advance(250); f.activity.observeOthers(0); f.activity.observeRemoteEnergy(loudEnergy); f.scheduler.tick();
+    }
+    check('no tiles but someone audible: not alone', fired === 0);
+    run(f, 500, 0);
+    check('…until the room has been silent for emptyMs too', fired === 1);
+  }
+  {
+    const f = presence();
+    let fired = 0;
+    f.activity.ready();
+    f.source.onAlone(() => fired++);
+    run(f, 1_750, 0);
+    check('never seen anyone: the empty count is not trusted', fired === 0);
+    run(f, 250, 0);
+    check('…and the silence window applies', fired === 1);
+  }
+  {
+    const f = presence();
+    let fired = 0;
+    f.activity.ready();
+    f.activity.observeOthers(1);
+    f.source.onAlone(() => fired++);
+    run(f, 1_750);
+    check('a stale count falls back to silence (not yet)', fired === 0);
+    run(f, 250);
+    check('a stale count falls back to silence', fired === 1);
+  }
+  {
+    const f = presence();
+    let fired = 0;
+    f.source.onAlone(() => fired++);
+    f.activity.observeOthers(0);
+    run(f, 10_000, 0);
+    check('capture not ready still fails closed', fired === 0);
+  }
+
+  const clock = new FakeClock();
+  const tap = createRemoteAudioActivityTap({ now: clock.now });
+  tap.ready();
+  clock.advance(100); tap.observeOthers(2);
+  clock.advance(100); tap.observeOthers(0);
+  tap.observeOthers(-1);
+  check('others: count, observation time, last-present time',
+    tap.snapshot().othersCount === 0 && tap.snapshot().othersObservedAt === 200 && tap.snapshot().othersPresentAt === 100);
+  tap.unavailable(); tap.ready();
+  check('a capture restart keeps what the page said about the people', tap.snapshot().othersPresentAt === 100);
+
+  check('BOT_ALONE_EMPTY_ROOM_MS unset: rule off', resolveAloneEmptyRoomMs({}) === undefined);
+  check('BOT_ALONE_EMPTY_ROOM_MS set', resolveAloneEmptyRoomMs({ BOT_ALONE_EMPTY_ROOM_MS: '30000' }) === 30_000);
+  check('BOT_ALONE_EMPTY_ROOM_MS invalid: rule off', resolveAloneEmptyRoomMs({ BOT_ALONE_EMPTY_ROOM_MS: 'soon' }, () => {}) === undefined);
 }
 
 // Timeout precedence: explicit invocation > valid env > 10-minute module default.

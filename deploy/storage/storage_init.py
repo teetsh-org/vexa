@@ -8,9 +8,10 @@ Runs inside the meeting-api image, which already carries boto3. Safe to re-run.
 2. Ensure the bucket exists, then PUT, GET (compare bytes), and DELETE a unique probe under
    .vexa-storage-init/. Every endpoint must pass, including operator-managed S3 stores.
 3. Authenticated bots configured against this storage (BOT_S3_ENDPOINT on the storage host, with
-   BOT_S3_ACCESS_KEY / BOT_S3_SECRET_KEY / BOT_USERDATA_S3_PATH) -> create or update that scoped
-   account, attach a bucket policy that limits it to its own prefix, and prove the limit: its own
-   prefix is readable and writable, everything else in the bucket is denied.
+   BOT_S3_ACCESS_KEY / BOT_S3_SECRET_KEY / BOT_USERDATA_S3_PATH, plus any BOT_EXTRA_IDENTITIES) ->
+   create or update one scoped account per identity, attach a bucket policy that limits each to its
+   own prefix, and prove the limits: each identity's own prefix is readable and writable, everything
+   else in the bucket is denied, the other identities' prefixes included.
 
 Exit codes: 0 ready - 1 the stack must not start (message says why).
 """
@@ -181,22 +182,61 @@ def ensure_scoped_account(endpoint: str, root_ak: str, root_sk: str, ak: str, sk
     return "updated"
 
 
-def userdata_policy(bucket: str, prefix: str, principal: str) -> dict:
-    return {
-        "Version": "2012-10-17",
-        "Statement": [
-            {"Sid": "VexaBotUserdataList", "Effect": "Allow", "Principal": {"AWS": [principal]},
+def userdata_policy(bucket: str, identities: list[tuple[str, str]]) -> dict:
+    """One bucket policy for every identity: each ``(prefix, principal)`` reaches its own prefix."""
+    statements = []
+    for n, (prefix, principal) in enumerate(identities, start=1):
+        suffix = "" if n == 1 else str(n)
+        statements += [
+            {"Sid": f"VexaBotUserdataList{suffix}", "Effect": "Allow", "Principal": {"AWS": [principal]},
              "Action": ["s3:ListBucket"], "Resource": [f"arn:aws:s3:::{bucket}"],
              "Condition": {"StringLike": {"s3:prefix": [f"{prefix}/*"]}}},
-            {"Sid": "VexaBotUserdataObjects", "Effect": "Allow", "Principal": {"AWS": [principal]},
+            {"Sid": f"VexaBotUserdataObjects{suffix}", "Effect": "Allow", "Principal": {"AWS": [principal]},
              "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
              "Resource": [f"arn:aws:s3:::{bucket}/{prefix}/*"]},
-        ],
-    }
+        ]
+    return {"Version": "2012-10-17", "Statement": statements}
 
 
-def prove_scope(endpoint: str, ak: str, sk: str, bucket: str, prefix: str, root) -> list[str]:
-    """Own prefix: allowed. A probe outside it and listings of recordings/ and the bucket: denied."""
+def bot_identities(root_ak: str) -> tuple[list[tuple[str, str, str]], str]:
+    """The ``(prefix, access key, secret key)`` of every identity, first identity first, or a STOP
+    reason. Mirrors meeting-api's ``bot_spawn.identities``: one key pair and one prefix each, and
+    no prefix inside another (its policy would reach the other's session)."""
+    first = (os.getenv("BOT_USERDATA_S3_PATH", "").strip().strip("/"),
+             os.getenv("BOT_S3_ACCESS_KEY", "").strip(), os.getenv("BOT_S3_SECRET_KEY", "").strip())
+    if not first[0]:
+        return [], "BOT_S3_* point at this storage but BOT_USERDATA_S3_PATH is empty; the scoped account needs its own prefix."
+    identities = [first]
+    raw = os.getenv("BOT_EXTRA_IDENTITIES", "").strip()
+    if raw:
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError as e:
+            return [], f"BOT_EXTRA_IDENTITIES is not valid JSON ({e.msg})."
+        if not isinstance(items, list):
+            return [], "BOT_EXTRA_IDENTITIES must be a JSON list of identities."
+        for n, item in enumerate(items, start=1):
+            item = item if isinstance(item, dict) else {}
+            ident = (str(item.get("path") or "").strip().strip("/"),
+                     str(item.get("accessKey") or "").strip(), str(item.get("secretKey") or "").strip())
+            if not all(ident):
+                return [], f"BOT_EXTRA_IDENTITIES[{n}] needs path, accessKey and secretKey."
+            identities.append(ident)
+    for i, (prefix, ak, _) in enumerate(identities):
+        if ak == root_ak:
+            return [], f"the access key of bot identity '{prefix}' is the storage root key. Authenticated bots need their own scoped key pair."
+        for other, other_ak, _ in identities[i + 1:]:
+            if prefix == other or prefix.startswith(other + "/") or other.startswith(prefix + "/"):
+                return [], f"bot identities '{prefix}' and '{other}' overlap; each identity needs its own prefix."
+            if ak == other_ak:
+                return [], f"bot identities '{prefix}' and '{other}' share an access key; each identity needs its own."
+    return identities, ""
+
+
+def prove_scope(endpoint: str, ak: str, sk: str, bucket: str, prefix: str, root,
+                other_prefixes: tuple[str, ...] = ()) -> list[str]:
+    """Own prefix: allowed. A probe outside it, the other identities' prefixes, and listings of
+    recordings/ and the bucket: denied."""
     c = client(endpoint, ak, sk)
     nonce = uuid4().hex
     other = f".vexa-storage-init/{nonce}/scope"
@@ -229,6 +269,15 @@ def prove_scope(endpoint: str, ak: str, sk: str, bucket: str, prefix: str, root)
     if root.get_object(Bucket=bucket, Key=other)["Body"].read() != b"not yours":
         bad.append("an object outside own prefix changed during the check")
     root.delete_object(Bucket=bucket, Key=other)
+    for neighbour in other_prefixes:
+        theirs = f"{neighbour}/.vexa-scope-check-{nonce}"
+        root.put_object(Bucket=bucket, Key=theirs, Body=b"not yours")
+        denied(f"list identity '{neighbour}'", lambda: c.list_objects_v2(Bucket=bucket, Prefix=f"{neighbour}/"))
+        denied(f"get from identity '{neighbour}'", lambda: c.get_object(Bucket=bucket, Key=theirs)["Body"].read())
+        denied(f"overwrite in identity '{neighbour}'", lambda: c.put_object(Bucket=bucket, Key=theirs, Body=b"x"))
+        if root.get_object(Bucket=bucket, Key=theirs)["Body"].read() != b"not yours":
+            bad.append(f"an object of identity '{neighbour}' changed during the check")
+        root.delete_object(Bucket=bucket, Key=theirs)
     return bad
 
 
@@ -248,31 +297,34 @@ def main() -> int:
     bot_ak, bot_sk = os.getenv("BOT_S3_ACCESS_KEY", "").strip(), os.getenv("BOT_S3_SECRET_KEY", "").strip()
     if not (bot_ep and bot_ak and bot_sk) or hostport(bot_ep)[0] != hostport(storage_ep)[0]:
         return 0
-    prefix = os.getenv("BOT_USERDATA_S3_PATH", "").strip().strip("/")
     bot_bucket = os.getenv("BOT_S3_BUCKET", "").strip() or bucket
     root_ak, root_sk = os.getenv("MINIO_ACCESS_KEY", ""), os.getenv("MINIO_SECRET_KEY", "")
-    if not prefix:
-        say("STOP: BOT_S3_* point at this storage but BOT_USERDATA_S3_PATH is empty; the scoped account needs its own prefix.")
-        return 1
-    if bot_ak == root_ak:
-        say("STOP: BOT_S3_ACCESS_KEY is the storage root key. Authenticated bots need their own scoped key pair.")
+    identities, stop = bot_identities(root_ak)
+    if stop:
+        say(f"STOP: {stop}")
         return 1
     rc = client(storage_ep, root_ak, root_sk)
     if not wait_ready(rc, f"storage at {storage_ep}"):
         return 1
     say(f"bucket '{bot_bucket}' {ensure_bucket(rc, bot_bucket)} for bot userdata")
-    say(f"scoped userdata account {ensure_scoped_account(storage_ep, root_ak, root_sk, bot_ak, bot_sk)}")
-    rc.put_bucket_policy(Bucket=bot_bucket, Policy=json.dumps(userdata_policy(bot_bucket, prefix, bot_ak)))
-    bad = []
-    for _ in range(10):  # the gateway caches IAM for a short while; give a fresh account a moment
-        bad = prove_scope(storage_ep, bot_ak, bot_sk, bot_bucket, prefix, rc)
-        if not bad:
-            break
-        time.sleep(2)
-    if bad:
-        say("STOP: the scoped userdata account is not limited as required: " + "; ".join(bad))
-        return 1
-    say(f"scoped userdata account limited to s3://{bot_bucket}/{prefix}/ (own prefix allowed; recordings and the rest denied)")
+    for prefix, ak, sk in identities:
+        say(f"scoped userdata account for '{prefix}' {ensure_scoped_account(storage_ep, root_ak, root_sk, ak, sk)}")
+    rc.put_bucket_policy(Bucket=bot_bucket, Policy=json.dumps(
+        userdata_policy(bot_bucket, [(prefix, ak) for prefix, ak, _ in identities])))
+    prefixes = [prefix for prefix, _, _ in identities]
+    for prefix, ak, sk in identities:
+        others = tuple(p for p in prefixes if p != prefix)
+        bad = []
+        for _ in range(10):  # the gateway caches IAM for a short while; give a fresh account a moment
+            bad = prove_scope(storage_ep, ak, sk, bot_bucket, prefix, rc, others)
+            if not bad:
+                break
+            time.sleep(2)
+        if bad:
+            say(f"STOP: the scoped userdata account for '{prefix}' is not limited as required: " + "; ".join(bad))
+            return 1
+        say(f"scoped userdata account limited to s3://{bot_bucket}/{prefix}/ (own prefix allowed; recordings, "
+            "the other identities and the rest denied)")
     return 0
 
 

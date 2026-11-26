@@ -59,7 +59,8 @@ class FakeS3:
 def isolated_env(monkeypatch):
     for name in ("S3_ENDPOINT", "S3_REGION", "S3_ACCESS_KEY", "S3_SECRET_KEY", "MINIO_ENDPOINT", "MINIO_SECURE",
                  "MINIO_BUCKET", "RECORDING_BUCKET", "BOT_S3_ENDPOINT", "BOT_S3_ACCESS_KEY",
-                 "BOT_S3_SECRET_KEY", "BOT_S3_BUCKET", "BOT_USERDATA_S3_PATH", "STORAGE_ENDPOINT"):
+                 "BOT_S3_SECRET_KEY", "BOT_S3_BUCKET", "BOT_USERDATA_S3_PATH", "BOT_EXTRA_IDENTITIES",
+                 "STORAGE_ENDPOINT"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("MINIO_ACCESS_KEY", "root-key")
     monkeypatch.setenv("MINIO_SECRET_KEY", "root-secret")
@@ -226,3 +227,70 @@ def test_scope_probe_never_writes_recordings(store, monkeypatch):
     assert store.objects == original
     writes = [key for step, _, key in store.calls if step in ("PUT probe", "DELETE probe")]
     assert all(key.startswith((".vexa-storage-init/", "userdata/")) for key in writes)
+
+
+# ── several bot identities: one scoped account each, none reaching another's session ──────────────
+
+def _scoped_to(store, prefix):
+    """A client the policy limits to ``prefix/``: anything else is AccessDenied."""
+    class ScopedClient:
+        def __getattr__(self, operation):
+            def call(**kwargs):
+                if not kwargs.get("Key", kwargs.get("Prefix", "")).startswith(prefix + "/"):
+                    raise ClientError({"Error": {"Code": "AccessDenied"}}, operation)
+                return getattr(store, operation)(**kwargs)
+            return call
+    return ScopedClient()
+
+
+def test_identity_cannot_reach_a_neighbours_session(store, monkeypatch):
+    monkeypatch.setattr(storage_init, "client", lambda *args, **kwargs: _scoped_to(store, "userdata/id-1"))
+    store.objects["userdata/id-2/browser-data/Default/Cookies"] = b"id-2 session"
+    original = dict(store.objects)
+    assert storage_init.prove_scope("http://storage:9000", "k1", "s1", "test-recordings", "userdata/id-1",
+                                    store, ("userdata/id-2",)) == []
+    assert store.objects == original                       # probes cleaned up, the session untouched
+
+
+def test_a_key_scoped_to_the_shared_parent_is_refused(store, monkeypatch):
+    """Negative control: a key that reaches every identity (scoped to userdata/) fails the check."""
+    monkeypatch.setattr(storage_init, "client", lambda *args, **kwargs: _scoped_to(store, "userdata"))
+    bad = storage_init.prove_scope("http://storage:9000", "k1", "s1", "test-recordings", "userdata/id-1",
+                                   store, ("userdata/id-2",))
+    assert any("identity 'userdata/id-2'" in b for b in bad), bad
+
+
+def test_policy_grants_each_identity_its_own_prefix():
+    policy = storage_init.userdata_policy("vexa-userdata", [("userdata/id-1", "k1"), ("userdata/id-2", "k2")])
+    sids = [st["Sid"] for st in policy["Statement"]]
+    assert len(sids) == len(set(sids)) == 4
+    by_principal = {}
+    for st in policy["Statement"]:
+        by_principal.setdefault(st["Principal"]["AWS"][0], []).append(st)
+    assert by_principal["k1"][1]["Resource"] == ["arn:aws:s3:::vexa-userdata/userdata/id-1/*"]
+    assert by_principal["k2"][1]["Resource"] == ["arn:aws:s3:::vexa-userdata/userdata/id-2/*"]
+    assert by_principal["k2"][0]["Condition"]["StringLike"]["s3:prefix"] == ["userdata/id-2/*"]
+
+
+@pytest.mark.parametrize("extra, stop", [
+    (None, ""),
+    ('[{"path": "/userdata/id-2/", "accessKey": "k2", "secretKey": "s2"}]', ""),
+    ("not json", "not valid JSON"),
+    ('{"path": "userdata/id-2"}', "JSON list"),
+    ('[{"path": "userdata/id-2", "accessKey": "k2"}]', "needs path, accessKey and secretKey"),
+    ('[{"path": "userdata/id-1/sub", "accessKey": "k2", "secretKey": "s2"}]', "overlap"),
+    ('[{"path": "userdata/id-2", "accessKey": "k1", "secretKey": "s2"}]', "share an access key"),
+    ('[{"path": "userdata/id-2", "accessKey": "root-key", "secretKey": "s2"}]', "storage root key"),
+])
+def test_bot_identities(monkeypatch, extra, stop):
+    monkeypatch.setenv("BOT_USERDATA_S3_PATH", "userdata/id-1")
+    monkeypatch.setenv("BOT_S3_ACCESS_KEY", "k1")
+    monkeypatch.setenv("BOT_S3_SECRET_KEY", "s1")
+    if extra is not None:
+        monkeypatch.setenv("BOT_EXTRA_IDENTITIES", extra)
+    identities, reason = storage_init.bot_identities("root-key")
+    assert (stop in reason) if stop else reason == ""
+    if not stop:
+        assert identities[0] == ("userdata/id-1", "k1", "s1")
+        if extra:
+            assert identities[1] == ("userdata/id-2", "k2", "s2")

@@ -226,6 +226,17 @@
    ]
   },
   {
+   "key": "BOT_EXTRA_IDENTITIES",
+   "class": "defaulted",
+   "default": "(unset — one identity, BOT_USERDATA_S3_PATH)",
+   "secret": true,
+   "description": "further authenticated-bot identities, as a JSON list of {path, accessKey, secretKey}: one provisioned account each, under its own userdata prefix with its own scoped key pair; N identities run N concurrent authenticated bots, each spawn taking the least recently used free one",
+   "targets": [
+    "compose",
+    "helm"
+   ]
+  },
+  {
    "key": "MINIO_ENDPOINT",
    "class": "defaulted",
    "default": "minio:9000",

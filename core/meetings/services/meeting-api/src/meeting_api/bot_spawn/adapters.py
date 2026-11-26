@@ -16,6 +16,12 @@ from typing import Optional
 
 from ..lifecycle.machine import dominant_completion_reason
 from ..sessions import new_session
+from .identities import (
+    IDENTITY_HOLDING_STATUSES,
+    IDENTITY_LOCK_KEY,
+    IdentityUsage,
+    choose_identity,
+)
 from .ports import (
     DuplicateMeeting,
     MaxBotsExceeded,
@@ -120,22 +126,36 @@ class SqlAlchemyMeetingRepo:
             )
             return [_row_to_dict(m) for m in (await db.execute(stmt)).scalars().all()]
 
-    async def find_active_by_userdata(self, userdata_s3_path) -> Optional[dict]:
-        from sqlalchemy import select
+    @staticmethod
+    async def _take_identity(db, paths, exclude_meeting_id=None) -> str:
+        """Choose an identity inside the caller's transaction. Takes the deployment-wide identity
+        lock first (held to commit), so two spawns of any users never read the same identity as
+        free; ``exclude_meeting_id`` is a row being reopened, which does not hold its own identity.
+        One aggregate over every user's rows that ever carried one of ``paths``, matched by
+        containment so the ``data`` GIN index serves it."""
+        from sqlalchemy import and_, bindparam, case, func, or_, select, text
 
         from ..sessions.models import Meeting
 
-        async with self._session_factory() as db:
-            stmt = (
-                select(Meeting)
-                .where(
-                    Meeting.status.in_(["requested", "joining", "awaiting_admission", "active", "stopping"]),
-                    Meeting.data["auth_userdata_path"].astext == userdata_s3_path,
-                )
-                .order_by(Meeting.created_at.desc())
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(CAST(:key AS bigint))").bindparams(
+                bindparam("key", IDENTITY_LOCK_KEY)
             )
-            m = (await db.execute(stmt)).scalars().first()
-            return _row_to_dict(m) if m else None
+        )
+        path_col = Meeting.data["auth_userdata_path"].astext
+        holding = Meeting.status.in_(IDENTITY_HOLDING_STATUSES)
+        if exclude_meeting_id is not None:
+            holding = and_(holding, Meeting.id != exclude_meeting_id)
+        stmt = (
+            select(path_col, func.max(case((holding, Meeting.id))), func.max(Meeting.created_at))
+            .where(or_(*[Meeting.data.contains({"auth_userdata_path": p}) for p in paths]))
+            .group_by(path_col)
+        )
+        usage = {
+            path: IdentityUsage(holder_meeting_id=holder, last_used=last)
+            for path, holder, last in (await db.execute(stmt)).all()
+        }
+        return choose_identity(list(paths), usage)
 
     async def find_latest(self, user_id, platform, native_meeting_id) -> Optional[dict]:
         from sqlalchemy import select
@@ -166,7 +186,7 @@ class SqlAlchemyMeetingRepo:
             ).scalars().first()
             return _row_to_dict(m) if m else None
 
-    async def reopen_meeting(self, *, meeting_id, data_patch=None) -> dict:
+    async def reopen_meeting(self, *, meeting_id, data_patch=None, identity_paths=None) -> dict:
         from sqlalchemy import select
         from sqlalchemy.orm.attributes import flag_modified
 
@@ -193,6 +213,13 @@ class SqlAlchemyMeetingRepo:
             )
             if m.status not in ("completed", "failed") or deletion_pending:
                 raise DuplicateMeeting("Terminal meeting is no longer reusable")
+            if identity_paths:
+                data_patch = {
+                    **dict(data_patch or {}),
+                    "auth_userdata_path": await self._take_identity(
+                        db, identity_paths, exclude_meeting_id=meeting_id
+                    ),
+                }
             m.status = "requested"
             m.end_time = None
             m.bot_container_id = None
@@ -458,9 +485,9 @@ class SqlAlchemyMeetingRepo:
 
     async def create_meeting_guarded(
         self, *, user_id, platform, native_meeting_id, data, max_concurrent=None,
-        exclude_meeting_id=None,
+        exclude_meeting_id=None, identity_paths=None,
     ) -> dict:
-        """ATOMIC dedup + cap + insert in ONE transaction (ROB1/ROB2).
+        """ATOMIC dedup + identity + cap + insert in ONE transaction (ROB1/ROB2).
 
         The TOCTOU-safe spawn primitive. Two layers guard it:
 
@@ -504,6 +531,13 @@ class SqlAlchemyMeetingRepo:
                 raise DuplicateMeeting(
                     f"An active meeting already exists for {platform}/{native_meeting_id}"
                 )
+            # 1b. identity — after the per-user lock (every path takes the two in this order), the
+            #     deployment-wide identity lock; the choice is written with the row below.
+            if identity_paths:
+                data = {
+                    **dict(data or {}),
+                    "auth_userdata_path": await self._take_identity(db, identity_paths),
+                }
             # 2. cap — count the user's active bots (browser_session excluded); reject the N+1th.
             #    (cap <= 0 was already rejected as depleted above.)
             if max_concurrent is not None:

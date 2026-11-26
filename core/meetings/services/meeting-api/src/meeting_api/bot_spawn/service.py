@@ -38,6 +38,7 @@ from ..service_authority import (
     ServiceAuthorityUnavailable,
 )
 from .env_flags import env_flag
+from .identities import BotIdentity, load_identities
 from .invocation import build_invocation, build_workload_spec, mint_meeting_token
 from .ports import (
     AuthSessionBusy,
@@ -402,6 +403,25 @@ async def _terminalize_as_stopped(
                   span="bots.create", meeting_id=str(meeting_id), fields={"error": str(e)})
 
 
+def _identity_of(row: dict, identities: list[BotIdentity]) -> Optional[BotIdentity]:
+    """The identity the store wrote onto the row, or ``None`` for an anonymous spawn."""
+    if not identities:
+        return None
+    path = (row.get("data") or {}).get("auth_userdata_path")
+    for identity in identities:
+        if identity.path == path:
+            return identity
+    raise RuntimeError("the meeting row carries no configured bot identity")
+
+
+def _log_auth_session_busy(user_id: int, e: AuthSessionBusy) -> None:
+    log_event(
+        "bot_spawn_auth_session_busy", audience="user", level="warning",
+        span="bots.create", user_id=user_id,
+        fields={"conflicting_meeting_ids": e.conflicting_meeting_ids},
+    )
+
+
 async def request_bot(
     repo: MeetingRepo,
     runtime: RuntimeClient,
@@ -534,23 +554,26 @@ async def request_bot(
     #     SECRET_KEY} (scoped userdata credentials — never the deployment's admin S3 creds; they
     #     ride the invocation env into the bot container, so their blast radius must stay the
     #     userdata prefix).
+    #     The deployment may declare several identities (``identities.load_identities``: the first
+    #     from BOT_USERDATA_S3_PATH + BOT_S3_*_KEY, more from BOT_EXTRA_IDENTITIES); the store
+    #     write below picks the one this spawn runs on.
     authenticated = env_flag("BOT_AUTHENTICATED", False)
-    auth_userdata_path: Optional[str] = None
-    auth_s3: dict[str, Optional[str]] = {}
+    identities: list[BotIdentity] = []
+    auth_s3_store: dict[str, Optional[str]] = {}
     if authenticated:
-        auth_userdata_path = os.getenv("BOT_USERDATA_S3_PATH") or None
-        auth_s3 = {
+        auth_s3_store = {
             "s3_endpoint": os.getenv("BOT_S3_ENDPOINT") or None,
             "s3_bucket": os.getenv("BOT_S3_BUCKET") or None,
-            "s3_access_key": os.getenv("BOT_S3_ACCESS_KEY") or None,
-            "s3_secret_key": os.getenv("BOT_S3_SECRET_KEY") or None,
         }
-        if not (auth_userdata_path and auth_s3["s3_endpoint"] and auth_s3["s3_bucket"]):
+        if not (os.getenv("BOT_USERDATA_S3_PATH") and auth_s3_store["s3_endpoint"]
+                and auth_s3_store["s3_bucket"]):
             raise AuthSessionNotConfigured(
                 "BOT_AUTHENTICATED is set but the userdata store is incomplete — set "
                 "BOT_USERDATA_S3_PATH + BOT_S3_ENDPOINT + BOT_S3_BUCKET (and scoped "
                 "BOT_S3_ACCESS_KEY/BOT_S3_SECRET_KEY); provision the session with `make login`"
             )
+        identities = load_identities()
+    identity_paths = [i.path for i in identities] or None
 
     # 2c. continue_meeting (P3c): reuse a TERMINAL prior meeting row if asked. The reused row keeps
     #     its id (so its transcripts/recordings survive); a fresh session is appended below. This read
@@ -594,21 +617,10 @@ async def request_bot(
     #     real adapter serializes per-user with a pg advisory lock + a unique partial index backstop;
     #     the fake has no await between the check and the insert). The continue_meeting (reused-
     #     terminal-row) path reopens an existing row and is unchanged.
-    # 2d. Per-identity serialization (#725 C2): one stored session = one live bot. Refuse a
-    #     second concurrent authenticated spawn against the same userdata path with a typed 409
-    #     naming the conflicting meeting. Control-plane pre-check against the tracked active set
-    #     (the issue's default); it runs just before the row insert, so the remaining window is a
-    #     single request interleaving — the storage-side lock fork stays available if a multi-
-    #     replica deployment ever witnesses it.
-    if authenticated and auth_userdata_path:
-        conflict = await repo.find_active_by_userdata(auth_userdata_path)
-        if conflict is not None and (reused_row is None or conflict["id"] != reused_row["id"]):
-            log_event(
-                "bot_spawn_auth_session_busy", audience="user", level="warning",
-                span="bots.create", user_id=user_id,
-                fields={"conflicting_meeting_id": conflict["id"]},
-            )
-            raise AuthSessionBusy(conflict["id"], auth_userdata_path)
+    # 2d. Per-identity serialization (#725 C2): one stored session = one live bot. The identity is
+    #     chosen in the same transaction as the row write (``create_meeting_guarded`` /
+    #     ``reopen_meeting`` with ``identity_paths``) under a deployment-wide lock: the least
+    #     recently used identity no live meeting holds, or a typed 409 naming the holders.
 
     # The service identity exists before any meeting row or workload. It is a
     # per-run identity (not the database row id): continued runs reuse a
@@ -676,15 +688,20 @@ async def request_bot(
                     fields={"active": active, "cap": max_concurrent},
                 )
                 raise MaxBotsExceeded(user_id, max_concurrent)
-        row = await repo.reopen_meeting(
-            meeting_id=reused_row["id"],
-            data_patch={
-                "transcribe_enabled": transcribe_enabled,
-                "recording_enabled": recording_enabled,
-                "transcription_provider": transcription_provider,
-                "service_authority": authority_record,
-            },
-        )
+        try:
+            row = await repo.reopen_meeting(
+                meeting_id=reused_row["id"],
+                data_patch={
+                    "transcribe_enabled": transcribe_enabled,
+                    "recording_enabled": recording_enabled,
+                    "transcription_provider": transcription_provider,
+                    "service_authority": authority_record,
+                },
+                identity_paths=identity_paths,
+            )
+        except AuthSessionBusy as e:
+            _log_auth_session_busy(user_id, e)
+            raise
     else:
         meeting_data: dict[str, Any] = {}
         if constructed_url:
@@ -694,9 +711,6 @@ async def request_bot(
         if transcription_provider is not None:
             meeting_data["transcription_provider"] = transcription_provider
         meeting_data["service_authority"] = authority_record
-        # The serialization key for authenticated spawns — find_active_by_userdata matches on it.
-        if authenticated and auth_userdata_path:
-            meeting_data["auth_userdata_path"] = auth_userdata_path
         # Per-user webhook config carried on the meeting (delivered by the lifecycle callback).
         # Stripped from any outbound meeting projection (webhooks.delivery._INTERNAL_DATA_KEYS). At
         # the API response edge the treatment splits (collector.projection): `webhook_secret` is
@@ -716,6 +730,7 @@ async def request_bot(
                 native_meeting_id=native_meeting_id,
                 data=meeting_data,
                 max_concurrent=max_concurrent,
+                identity_paths=identity_paths,
             )
         except MaxBotsExceeded:
             log_event(
@@ -724,7 +739,11 @@ async def request_bot(
                 fields={"cap": max_concurrent},
             )
             raise
+        except AuthSessionBusy as e:
+            _log_auth_session_busy(user_id, e)
+            raise
     meeting_id = row["id"]
+    identity = _identity_of(row, identities)
 
     # 4. MeetingToken + invocation. connection_id IS the session_uid (parent's connectionId).
     redis_url = redis_url or os.getenv("REDIS_URL", "redis://redis:6379/0")
@@ -768,11 +787,11 @@ async def request_bot(
         capture_signal_enabled=capture_signal_enabled,
         recording_upload_url=f"{meeting_api_url}/internal/recordings/upload",
         authenticated=True if authenticated else None,
-        userdata_s3_path=auth_userdata_path,
-        s3_endpoint=auth_s3.get("s3_endpoint"),
-        s3_bucket=auth_s3.get("s3_bucket"),
-        s3_access_key=auth_s3.get("s3_access_key"),
-        s3_secret_key=auth_s3.get("s3_secret_key"),
+        userdata_s3_path=identity.path if identity else None,
+        s3_endpoint=auth_s3_store.get("s3_endpoint"),
+        s3_bucket=auth_s3_store.get("s3_bucket"),
+        s3_access_key=identity.access_key if identity else None,
+        s3_secret_key=identity.secret_key if identity else None,
         # Explicit caller windows win; otherwise omit everyoneLeftTimeout so the bot's
         # silence-window module default applies (the lobby window stays forgiving for
         # human-in-the-loop dashboard joins).

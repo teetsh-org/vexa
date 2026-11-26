@@ -16,9 +16,11 @@ fully in-process.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from ..lifecycle.machine import dominant_completion_reason
+from .identities import IDENTITY_HOLDING_STATUSES, IdentityUsage, choose_identity
 from .ports import (
     DuplicateMeeting,
     MaxBotsExceeded,
@@ -33,6 +35,7 @@ from .ports import (
 
 _ACTIVE_STATUSES = ("requested", "joining", "awaiting_admission", "active")
 _TERMINAL_STATUSES = ("completed", "failed")
+_EPOCH = datetime(2026, 1, 1)
 
 
 class InMemoryMeetingRepo:
@@ -66,14 +69,23 @@ class InMemoryMeetingRepo:
         rows.sort(key=lambda m: m.get("id") or 0, reverse=True)   # newest first, as the SQL does
         return rows
 
-    async def find_active_by_userdata(self, userdata_s3_path) -> Optional[dict]:
-        for m in self._meetings.values():
-            if (
-                m["status"] in _ACTIVE_STATUSES
-                and m.get("data", {}).get("auth_userdata_path") == userdata_s3_path
-            ):
-                return dict(m)
-        return None
+    def _take_identity(self, paths, exclude_meeting_id=None) -> str:
+        """Identity choice over every user's rows, mirroring the real adapter's aggregate. Called
+        with no ``await`` before the write that records the choice, so it is atomic here too."""
+        usage = {}
+        for p in paths:
+            rows = [m for m in self._meetings.values() if m.get("data", {}).get("auth_userdata_path") == p]
+            holders = [
+                m["id"] for m in rows
+                if m["status"] in IDENTITY_HOLDING_STATUSES and m["id"] != exclude_meeting_id
+            ]
+            # The fake's created_at is a fixed string; ids are monotonic, so they stand in for it.
+            used = [_EPOCH + timedelta(seconds=m["id"]) for m in rows]
+            usage[p] = IdentityUsage(
+                holder_meeting_id=max(holders) if holders else None,
+                last_used=max(used) if used else None,
+            )
+        return choose_identity(list(paths), usage)
 
     async def find_latest(self, user_id, platform, native_meeting_id) -> Optional[dict]:
         rows = [
@@ -108,7 +120,7 @@ class InMemoryMeetingRepo:
 
     async def create_meeting_guarded(
         self, *, user_id, platform, native_meeting_id, data, max_concurrent=None,
-        exclude_meeting_id=None,
+        exclude_meeting_id=None, identity_paths=None,
     ) -> dict:
         """ATOMIC dedup + cap + insert (ROB1/ROB2). The check and the insert run with NO ``await``
         between them, so even ``SlowRepo`` (which adds ``await asyncio.sleep(0)`` inside the SEPARATE
@@ -129,6 +141,9 @@ class InMemoryMeetingRepo:
                 raise DuplicateMeeting(
                     f"An active meeting already exists for {platform}/{native_meeting_id}"
                 )
+        # 1b. identity — the least recently used free identity across every user (409 when none).
+        if identity_paths:
+            data = {**dict(data or {}), "auth_userdata_path": self._take_identity(identity_paths)}
         # 2. cap — count the user's ACTIVE bots (browser_session excluded); reject the N+1th (429).
         if max_concurrent is not None:
             active = sum(
@@ -220,7 +235,7 @@ class InMemoryMeetingRepo:
         # very race it exists to close).
         return dict(row) if row else None
 
-    async def reopen_meeting(self, *, meeting_id, data_patch=None) -> dict:
+    async def reopen_meeting(self, *, meeting_id, data_patch=None, identity_paths=None) -> dict:
         row = self._meetings[meeting_id]
         data = row.get("data") or {}
         if data.get("stop_requested"):
@@ -231,6 +246,11 @@ class InMemoryMeetingRepo:
         )
         if row.get("status") not in ("completed", "failed") or deletion_pending:
             raise DuplicateMeeting("Terminal meeting is no longer reusable")
+        if identity_paths:
+            data_patch = {
+                **dict(data_patch or {}),
+                "auth_userdata_path": self._take_identity(identity_paths, exclude_meeting_id=meeting_id),
+            }
         row["status"] = "requested"
         row["end_time"] = None
         row["bot_container_id"] = None

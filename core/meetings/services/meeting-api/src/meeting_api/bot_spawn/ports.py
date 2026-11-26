@@ -51,16 +51,6 @@ class MeetingRepo(Protocol):
         the caller de-duplicates on the ``stop_requested`` flag rather than on status."""
         ...
 
-    async def find_active_by_userdata(self, userdata_s3_path: str) -> Optional[dict]:
-        """Any user's ACTIVE meeting whose spawn carried this ``userdata_s3_path``
-        (``meeting.data.auth_userdata_path``), or ``None``. The per-identity serialization
-        boundary for authenticated bots: one stored browser session = one Google identity =
-        one live cookie jar, so a second concurrent spawn against the same path is refused
-        (→ HTTP 409, ``AuthSessionBusy``) — running one identity from N containers/IPs at
-        once is both an account-risk signal and a write-back race. Cross-user by design:
-        the identity is deployment-scoped, not per-user."""
-        ...
-
     async def find_latest(self, user_id: int, platform: str, native_meeting_id: str) -> Optional[dict]:
         """The user's MOST-RECENT meeting for ``(platform, native_id)`` regardless of status, or
         ``None``. ``continue_meeting`` reuses this row when it is TERMINAL (completed/failed)."""
@@ -82,8 +72,9 @@ class MeetingRepo(Protocol):
         data: dict,
         max_concurrent: Optional[int] = None,
         exclude_meeting_id: Optional[int] = None,
+        identity_paths: Optional[list[str]] = None,
     ) -> dict:
-        """ATOMIC dedup + cap-check + insert — the TOCTOU-safe spawn primitive (ROB1/ROB2).
+        """ATOMIC dedup + identity + cap-check + insert — the TOCTOU-safe spawn primitive (ROB1/ROB2).
 
         A ``max_concurrent <= 0`` means the user's quota is DEPLETED (0 = no bots, never
         "unlimited"): raise ``MaxBotsExceeded`` immediately, before any of the steps below.
@@ -92,6 +83,11 @@ class MeetingRepo(Protocol):
         Performs, in a SINGLE transaction with NO yield point between the checks and the insert:
           1. dedup — if the user already has an ACTIVE row for ``(platform, native_meeting_id)``,
              raise ``DuplicateMeeting`` (→ HTTP 409);
+          1b. identity — when ``identity_paths`` is given (authenticated bots), take the least
+             recently used identity no live meeting of ANY user holds (``identities.choose_identity``)
+             and write it to ``data.auth_userdata_path``; none free raises ``AuthSessionBusy``
+             (→ HTTP 409). Serialized deployment-wide (``identities.IDENTITY_LOCK_KEY``), since
+             identities are shared by every user;
           2. cap — if ``max_concurrent`` is set and the user already has ``>= max_concurrent`` ACTIVE
              bots (``browser_session`` excluded; ``exclude_meeting_id`` not counted), raise
              ``MaxBotsExceeded`` (→ HTTP 429);
@@ -105,11 +101,14 @@ class MeetingRepo(Protocol):
         ...
 
     async def reopen_meeting(
-        self, *, meeting_id: int, data_patch: Optional[dict] = None
+        self, *, meeting_id: int, data_patch: Optional[dict] = None,
+        identity_paths: Optional[list[str]] = None,
     ) -> dict:
         """Reset a TERMINAL meeting row back to ``requested`` for a continued run (``continue_meeting``):
         clear the prior terminal attribution, keep the row id (so transcripts/recordings keyed by it
-        survive), and freeze the new session's service-selection facts. Returns the updated row."""
+        survive), and freeze the new session's service-selection facts. With ``identity_paths``,
+        takes an identity exactly as ``create_meeting_guarded`` step 1b does, in the same
+        transaction. Returns the updated row."""
         ...
 
     async def create_session(self, *, meeting_id: int, session_uid: str) -> None:
@@ -302,19 +301,28 @@ class AuthSessionNotConfigured(Exception):
 
 
 class AuthSessionBusy(Exception):
-    """A second concurrent authenticated spawn against the SAME stored session — HTTP 409.
+    """Every configured authenticated identity is held by a live meeting — HTTP 409.
 
-    Names the conflicting meeting so the operator can wait for or stop it. One identity,
-    one writer: serializing spawns per ``userdata_s3_path`` protects both the account's
-    risk posture (one cookie jar live from one place) and write-back integrity."""
+    Names the holding meetings so the operator can wait for or stop one. One identity,
+    one writer: a stored session runs one bot at a time, which protects both the account's
+    risk posture (one cookie jar live from one place) and write-back integrity. The message
+    never names the userdata prefixes: they locate credential material."""
 
-    def __init__(self, conflicting_meeting_id: int, userdata_s3_path: str):
-        self.conflicting_meeting_id = conflicting_meeting_id
-        self.userdata_s3_path = userdata_s3_path
-        super().__init__(
-            f"authenticated session '{userdata_s3_path}' is in use by active meeting "
-            f"{conflicting_meeting_id} — one stored session runs one bot at a time"
-        )
+    def __init__(self, conflicting_meeting_ids: list[int]):
+        self.conflicting_meeting_ids = list(conflicting_meeting_ids)
+        self.conflicting_meeting_id = self.conflicting_meeting_ids[0]
+        if len(self.conflicting_meeting_ids) == 1:
+            detail = (
+                f"the authenticated session is in use by active meeting "
+                f"{self.conflicting_meeting_id} — one stored session runs one bot at a time"
+            )
+        else:
+            ids = ", ".join(str(i) for i in self.conflicting_meeting_ids)
+            detail = (
+                f"all {len(self.conflicting_meeting_ids)} authenticated sessions are in use by "
+                f"active meetings {ids} — one stored session runs one bot at a time"
+            )
+        super().__init__(detail)
 
 
 class SpawnFailed(Exception):

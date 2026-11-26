@@ -63,12 +63,28 @@ bots. If the session store is unreachable at spawn time, the bot fails loud with
 `session-restore` error naming the step and endpoint — it never joins signed-out on a failed
 restore.
 
-**One session, one bot at a time.** A second concurrent spawn against the same stored session is
-refused with a 409 naming the meeting that holds it. One live cookie jar used from N containers
-and IPs at once is a textbook account-risk signal to Google, and concurrent runs would race the
-write-back below. Need N concurrent authenticated bots? Provision N accounts under N
-`BOT_USERDATA_S3_PATH` prefixes (today that means N deployments of the spawn knob, one identity
-each).
+**One session, one bot at a time.** A stored session runs one bot at a time, from the spawn until
+the bot has torn down (`stopping` included, since the write-back below runs then). One live cookie
+jar used from N containers and IPs at once is a textbook account-risk signal to Google, and
+concurrent runs would race the write-back.
+
+**N identities, N concurrent bots.** Provision more accounts, each under its own prefix with its
+own scoped key pair, and list them after the first one:
+
+```bash
+BOT_EXTRA_IDENTITIES='[{"path":"userdata/bot-identity-2","accessKey":"...","secretKey":"..."}]'
+```
+
+(helm: `meetingApi.botExtraIdentities`, a list of the same objects.) Each spawn takes the **least
+recently used** identity that no live meeting holds, so every account keeps being used and its
+session keeps rotating. The choice is made in the same transaction as the meeting row, under a
+deployment-wide lock, so two spawns never share an identity, whichever users send them. When every
+identity is held, `POST /bots` answers **409** naming the meetings that hold them. A pool whose
+identities share a prefix (or nest one inside another) or a key pair is refused with a 503.
+
+Provision each identity with `make login`, setting `BOT_USERDATA_S3_PATH` and the `BOT_S3_*_KEY`
+pair to that identity's values. Raise the API user's `max_concurrent_bots` to the number of
+identities, or the per-user cap refuses the extra bots first.
 
 ## 3. Session lifetime — the session stays alive because it is used
 
@@ -93,7 +109,8 @@ The levers that make session lifetime a configured property instead of luck:
   run a periodic authenticated meeting (or simply schedule the bot into a recurring internal
   meeting) so rotation keeps happening. There is no packaged keep-warm job today; a cron'd
   `POST /bots` into a standing meeting is the recipe.
-- **N accounts for N concurrent bots** — follows from the one-session-one-bot rule above.
+- **N accounts for N concurrent bots** — follows from the one-session-one-bot rule above; declare
+  them in `BOT_EXTRA_IDENTITIES`.
 
 ## When the session dies anyway — the recovery loop
 
@@ -139,8 +156,9 @@ s3://<BOT_S3_BUCKET>/<BOT_USERDATA_S3_PATH>/browser-data/
 - **Compose** — supported as above; the in-stack `storage` service (versitygw) is the userdata
   store. Choose a key pair for `BOT_S3_ACCESS_KEY` / `BOT_S3_SECRET_KEY` (different from
   `MINIO_ACCESS_KEY`) and set `BOT_S3_ENDPOINT=http://storage:9000`: on bring-up, `storage-init`
-  creates that account, attaches a bucket policy that limits it to `BOT_USERDATA_S3_PATH`, and
-  checks the limit (its own prefix readable and writable; recordings and other prefixes denied).
+  creates that account (and one per `BOT_EXTRA_IDENTITIES` entry), attaches a bucket policy that
+  limits each to its own prefix, and checks the limits (its own prefix readable and writable;
+  recordings, the other identities' prefixes and the rest denied).
   If the check fails it exits 1, and `docker compose up` does not start meeting-api.
 - **Kubernetes/Helm** — set the same `BOT_AUTHENTICATED` / `BOT_*` env on the meeting-api
   deployment (values → env); point the S3 vars at storage the bot pods can reach.

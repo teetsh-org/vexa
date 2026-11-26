@@ -82,7 +82,8 @@ services:
     # Checks the endpoint meeting-api uses (deploy/storage/storage_init.py, with its Python + boto3):
     # ensures the bucket exists and PUTs/GETs/DELETEs a probe under .vexa-storage-init/, comparing bytes.
     # Any failure holds meeting-api back. When authenticated bots point BOT_S3_ENDPOINT here, also
-    # creates their scoped account and bucket policy limited to BOT_USERDATA_S3_PATH, then proves it.
+    # creates one scoped account per identity and a bucket policy limiting each to its own prefix
+    # (BOT_USERDATA_S3_PATH, then BOT_EXTRA_IDENTITIES), then proves it.
     build:
       context: ../..
       dockerfile: core/meetings/services/meeting-api/Dockerfile
@@ -107,6 +108,7 @@ services:
       - BOT_S3_ACCESS_KEY=${BOT_S3_ACCESS_KEY:-}
       - BOT_S3_SECRET_KEY=${BOT_S3_SECRET_KEY:-}
       - BOT_USERDATA_S3_PATH=${BOT_USERDATA_S3_PATH:-}
+      - BOT_EXTRA_IDENTITIES=${BOT_EXTRA_IDENTITIES:-}
     volumes:
       - ../storage:/vexa-storage-tools:ro
     networks: [vexa]
@@ -383,6 +385,8 @@ services:
       - BOT_S3_BUCKET=${BOT_S3_BUCKET:-}
       - BOT_S3_ACCESS_KEY=${BOT_S3_ACCESS_KEY:-}
       - BOT_S3_SECRET_KEY=${BOT_S3_SECRET_KEY:-}
+      # Further identities, one concurrent bot each: JSON [{path, accessKey, secretKey}].
+      - BOT_EXTRA_IDENTITIES=${BOT_EXTRA_IDENTITIES:-}
       # Optional operator-owned service-authority.v1 boundary. Empty is explicit OSS allow-all.
       - VEXA_SERVICE_AUTHORITY_CONFIG=${VEXA_SERVICE_AUTHORITY_CONFIG:-}
       - VEXA_SERVICE_AUTHORITY_SECRET=${VEXA_SERVICE_AUTHORITY_SECRET:-}

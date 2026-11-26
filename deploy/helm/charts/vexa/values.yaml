@@ -242,6 +242,10 @@ meetingApi:
   botS3Bucket: ""
   botS3AccessKey: ""
   botS3SecretKey: ""
+  # Further identities, one concurrent authenticated bot each: a provisioned account under its own
+  # prefix with its own scoped key pair. Rendered to BOT_EXTRA_IDENTITIES as JSON.
+  #   - {path: userdata/bot-identity-2, accessKey: "...", secretKey: "..."}
+  botExtraIdentities: []
   logLevel: "info"
   resources:
     requests: { cpu: 200m, memory: 512Mi }

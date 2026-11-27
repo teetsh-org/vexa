@@ -20,7 +20,7 @@
  * Run: npx tsx src/googlemeet/session.test.ts
  */
 
-import { joinGoogleMeeting, isGoogleSignedOutLobby, AuthSessionError } from './join';
+import { joinGoogleMeeting, isGoogleSignedOutLobby, isGoogleSignInUrl, AuthSessionError } from './join';
 import { googleAuthJoinCtaSelectors, googleSignedOutLobbyProbeSelectors } from './selectors';
 
 // Structural (locale-agnostic) vs English-literal selector split, derived from
@@ -37,7 +37,7 @@ const PROBE_ENGLISH = googleSignedOutLobbyProbeSelectors.filter(isEnglishLiteral
  * that resolve on this page; every click on a resolved handle is recorded in
  * `clicks` (keyed by the selector that produced the handle).
  */
-function mockPage(visible: string[]) {
+function mockPage(visible: string[], url = 'https://meet.google.com/abc-defg-hij') {
   const clicks: string[] = [];
   const handle = (sel: string) => ({
     click: async () => { clicks.push(sel); },
@@ -51,7 +51,7 @@ function mockPage(visible: string[]) {
     waitForTimeout: async () => {},
     fill: async () => {},
     mouse: { move: async () => {} },
-    url: () => 'https://meet.google.com/abc-defg-hij',
+    url: () => url,
     // The lobby-CTA resolvers read the observed locale for the failure
     // diagnostic and run the structural scan through evaluateHandle; neither
     // resolves anything on this fixture, which is driven purely by `visible`.
@@ -149,7 +149,20 @@ function check(name: string, ok: boolean, detail = '') {
     check('…and the CTA was clicked exactly once', page.clicks.length === 1, `clicks: ${page.clicks}`);
   }
 
+  // 5. Google re-auth redirect ("Verify it's you") with a lone CTA-like button → typed
+  //    auth error, nothing clicked (2026-11-27: the bot clicked "Next" and polled 15 min).
+  {
+    const page = mockPage([...CTA_STRUCTURAL],
+      'https://accounts.google.com/v3/signin/confirmidentifier?continue=https://meet.google.com/abc-defg-hij');
+    const err = await join(page).then(() => null, (e: unknown) => e);
+    check('Google sign-in redirect → AuthSessionError', err instanceof AuthSessionError, String(err));
+    check('…and nothing was clicked', page.clicks.length === 0, `clicks: ${page.clicks}`);
+  }
+
   console.log('\n=== isGoogleSignedOutLobby unit rows ===');
+  check('accounts.google.com page → signed-out', await isGoogleSignedOutLobby(mockPage(CTA_STRUCTURAL, 'https://accounts.google.com/v3/signin/confirmidentifier')));
+  check('meet.google.com URL → not a sign-in URL', !isGoogleSignInUrl('https://meet.google.com/abc-defg-hij'));
+  check('garbage URL → not a sign-in URL', !isGoogleSignInUrl('not a url'));
   check('structural name input alone → signed-out', await isGoogleSignedOutLobby(mockPage(PROBE_STRUCTURAL)));
   check('English name input alone → signed-out', await isGoogleSignedOutLobby(mockPage(PROBE_ENGLISH)));
   check('no name input → NOT signed-out', !(await isGoogleSignedOutLobby(mockPage(CTA_STRUCTURAL))));

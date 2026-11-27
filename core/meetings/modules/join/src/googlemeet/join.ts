@@ -31,8 +31,24 @@ export class AuthSessionError extends AdmissionError {
  * (jsname/attribute) selectors carry the detection so it cannot fail open on a
  * non-English lobby. A probe error on one selector never breaks the guard —
  * the remaining selectors still get their chance.
+ *
+ * A page on Google's sign-in host is signed out too: when Google wants the
+ * account to re-authenticate ("Verify it's you", /v3/signin/confirmidentifier)
+ * it redirects there instead of rendering the lobby, and that page has no name
+ * input but does have a lone "Next" button the CTA resolver would click.
  */
+export function isGoogleSignInUrl(url: string): boolean {
+  try {
+    return new URL(url).hostname === "accounts.google.com";
+  } catch {
+    return false;
+  }
+}
+
 export async function isGoogleSignedOutLobby(page: Page): Promise<boolean> {
+  try {
+    if (isGoogleSignInUrl(page.url())) return true;
+  } catch { /* fall through to the structural probes */ }
   for (const sel of googleSignedOutLobbyProbeSelectors) {
     try {
       if (await page.locator(sel).first().isVisible()) return true;
